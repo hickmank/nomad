@@ -21,3 +21,6 @@ ursa_workspace/
 
 # secrets
 .env
+
+# Personal learning scratch space (see learning/)
+scratch/
