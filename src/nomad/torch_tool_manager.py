@@ -32,11 +32,15 @@ def empty_accelerator_cache() -> None:
     """Release unused Python and accelerator memory back to the runtime."""
     gc.collect()
 
-    accelerator = getattr(torch, "accelerator", None)
-    if accelerator is not None and accelerator.is_available():
-        accelerator.memory.empty_cache()
-    elif torch.cuda.is_available():
+    if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        # torch.accelerator.memory asserts on MPS, which lacks a DeviceAllocator.
+        torch.mps.empty_cache()
+    else:
+        accelerator = getattr(torch, "accelerator", None)
+        if accelerator is not None and accelerator.is_available():
+            accelerator.memory.empty_cache()
 
 
 @dataclass(frozen=True, slots=True)

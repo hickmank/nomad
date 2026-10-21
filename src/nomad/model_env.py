@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -161,15 +162,61 @@ class HostEnvironment:
         return self.python
 
 
-PythonEnvironment = ModelEnvironment | HostEnvironment
+@dataclass(frozen=True, slots=True)
+class ExistingEnvironment:
+    """A pre-built Python interpreter (venv or conda) managed outside Nomad."""
+
+    python: Path
+    base_dir: Path = field(default_factory=Path.cwd)
+
+    @property
+    def checksum(self) -> str:
+        return blake2b(f"{_HASH_PREFIX}existing-{self.python}".encode()).hexdigest()
+
+    @property
+    def prefix(self) -> Path:
+        """Return the environment prefix, i.e. the parent of its ``bin`` directory."""
+        return self.python.parent.parent
+
+    @property
+    def is_venv(self) -> bool:
+        return (self.prefix / "pyvenv.cfg").is_file()
+
+    def ensure(self) -> Path:
+        if not self.python.is_file():
+            raise FileNotFoundError(
+                f"Model Python interpreter not found: {self.python}"
+            )
+        if not os.access(self.python, os.X_OK):
+            raise PermissionError(
+                f"Model Python interpreter is not executable: {self.python}"
+            )
+        return self.python
+
+
+PythonEnvironment = ModelEnvironment | HostEnvironment | ExistingEnvironment
 
 
 def resolve_model_environment(
     value: str | list[str] | None,
     *,
     base_dir: Path | None = None,
+    python: str | Path | None = None,
 ) -> PythonEnvironment:
-    """Normalize a model's PEP 508 requirements for subprocess execution."""
+    """Normalize a model's PEP 508 requirements or interpreter for subprocesses."""
+    if python is not None:
+        if value is not None:
+            raise ValueError("A model environment cannot set both env and python")
+        resolved_base = (base_dir or Path.cwd()).expanduser().resolve()
+        interpreter = Path(python).expanduser()
+        if not interpreter.is_absolute():
+            interpreter = resolved_base / interpreter
+        # Keep symlinks: a venv's bin/python usually links outside the venv.
+        return ExistingEnvironment(
+            python=Path(os.path.normpath(interpreter)),
+            base_dir=resolved_base,
+        )
+
     if value is None:
         return HostEnvironment(
             python=Path(sys.executable).absolute(),
@@ -249,6 +296,7 @@ def _run(command: list[str], *, cwd: Path) -> None:
 
 
 __all__ = [
+    "ExistingEnvironment",
     "HostEnvironment",
     "ModelEnvironment",
     "PythonEnvironment",

@@ -83,7 +83,7 @@ def test_getting_started_gateway_yaml_examples_are_valid() -> None:
 
 def test_reference_config_yaml_examples_are_valid() -> None:
     counts = _validate_classified_yaml_blocks(Path("docs/reference/config.md"))
-    assert counts == {"server": 1, "gateway": 2, "external": 0}
+    assert counts == {"server": 2, "gateway": 2, "external": 0}
 
 
 def test_model_builder_yaml_examples_are_valid() -> None:

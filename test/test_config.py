@@ -664,3 +664,43 @@ def test_server_config_accepts_search_tool_weights():
     assert config.search_tool.weights.prefix_name == 9.0
     assert config.search_tool.weights.suffix_name == 5.0
     assert config.search_tool.weights.substring_name == 1.0
+
+
+def test_torch_module_config_rejects_env_and_python():
+    with pytest.raises(ValidationError, match="either env or python"):
+        TorchModuleConfig(
+            model_class="demo.Tool",
+            name_or_path="demo/model",
+            env="demo-package",
+            python="/opt/env/bin/python",
+        )
+
+
+def test_server_config_from_file_resolves_python_from_config_dir(
+    monkeypatch, tmp_path: Path
+):
+    from nomad.model_env import ExistingEnvironment
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_path = config_dir / "nomad.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "fmod_models:",
+                "  - model_class: demo.Tool",
+                "    name_or_path: demo/model",
+                "    python: ${MODEL_ENV}/bin/python",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MODEL_ENV", "../envs/yoke")
+    monkeypatch.chdir(tmp_path)
+
+    config = ServerConfig.from_file(config_path)
+    environment = config.fmod_models[0].resolve_environment(base_dir=config.context_dir)
+
+    assert isinstance(environment, ExistingEnvironment)
+    assert environment.python == tmp_path.resolve() / "envs/yoke/bin/python"

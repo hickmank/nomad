@@ -47,6 +47,22 @@ requirements. `requirements.txt` and `pyproject.toml` paths are not supported.
 Direct references must use absolute URLs, such as
 `my-package @ file:///opt/packages/my-package`.
 
+Alternatively, set `python` to an existing interpreter, such as a virtual
+environment's `bin/python` or a conda environment's `bin/python`, when a model
+needs a Python environment that Nomad should not build (for example, a training
+framework installed in its own environment). Relative paths resolve against the
+config file's directory, and `${VAR}` placeholders are expanded. The interpreter
+must be able to import `nomad` and the model's `model_class`. `env` and `python`
+are mutually exclusive.
+
+```yaml
+fmod_models:
+  - model_class: my_package.models.MyTorchTool
+    name_or_path: file:models/my-model
+    python: ${MODEL_ENV}/bin/python
+    tool_name: my-model
+```
+
 Models run in per-device Python subprocesses. When `env` is omitted, the
 subprocess uses the same virtual environment and Python executable as the Nomad
 host. For explicit environments, Nomad prefers `uv` to create the virtual
@@ -68,7 +84,9 @@ models. Set `NOMAD_CACHE=<output>` when serving the exported config so those
 environments are reused. Build the bundle at its final absolute deployment path
 (for example, `nomad export nomad.yml /opt/nomad`): virtual environments are not
 relocatable and must run with a Python runtime compatible with the one used for
-the export. Pass `--no-venv` to omit them from an export.
+the export. Pass `--no-venv` to omit them from an export. A model's `python`
+interpreter is never copied into the bundle; `nomad export` rewrites it as an
+absolute path and warns that the bundle is not self-contained for that model.
 
 | Name | Example |
 | --- | --- |

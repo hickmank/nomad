@@ -19,7 +19,7 @@ from nomad.config import ServerConfig, TorchModuleConfig
 from nomad.hub import RepoSpec
 from nomad.logging_utils import configure_root_logging, parse_log_level
 from nomad.model_cards import ModelCardLocator
-from nomad.model_env import ModelEnvironment
+from nomad.model_env import ExistingEnvironment, ModelEnvironment
 
 LogLevelName = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LOGGER = logging.getLogger(__name__)
@@ -260,6 +260,26 @@ def _build_exported_model_environments(
         environment.ensure(cache_root=cache_root)
 
 
+def _pin_existing_interpreters(
+    raw_models: list[Any],
+    models: list[TorchModuleConfig],
+    base_dir: Path,
+) -> None:
+    """Rewrite ``python`` paths as absolute; the bundle cannot carry them."""
+    for raw_entry, model in zip(raw_models, models, strict=True):
+        if model.python is None or not isinstance(raw_entry, dict):
+            continue
+        environment = model.resolve_environment(base_dir=base_dir)
+        assert isinstance(environment, ExistingEnvironment)
+        raw_entry["python"] = str(environment.python)
+        LOGGER.warning(
+            "Model '%s' uses external interpreter %s; the export bundle is not "
+            "self-contained for this model",
+            model.tool_name or model.name_or_path,
+            environment.python,
+        )
+
+
 def export_models_config(
     config_path: Path,
     output_dir: Path,
@@ -281,6 +301,7 @@ def export_models_config(
     )
 
     raw_models = exported_data.get("fmod_models", []) or []
+    _pin_existing_interpreters(raw_models, config.fmod_models, config.context_dir)
     if build_venvs:
         _build_exported_model_environments(
             config.fmod_models,

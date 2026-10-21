@@ -110,6 +110,13 @@ class TorchModuleConfig(BaseModel):
     env: str | list[str] | None = None
     """One PEP 508 requirement or a list for an isolated model environment."""
 
+    python: str | None = None
+    """Existing interpreter (venv or conda) to run the model in, instead of ``env``.
+
+    Relative paths resolve against the configuration file's directory. The
+    interpreter must be able to import ``nomad`` and ``model_class``.
+    """
+
     model_config = ConfigDict(extra="allow")
 
     @field_validator("env")
@@ -155,6 +162,12 @@ class TorchModuleConfig(BaseModel):
                     )
         return value
 
+    @model_validator(mode="after")
+    def _validate_single_environment(self) -> TorchModuleConfig:
+        if self.env is not None and self.python is not None:
+            raise ValueError("Set either env or python for a model, not both")
+        return self
+
     def resolve_spec(self, *, base_dir: Path | None = None) -> RepoSpec:
         """Resolve ``name_or_path`` to a normalized model source specification."""
         return RepoSpec.parse(self.name_or_path, base_dir=base_dir)
@@ -164,8 +177,10 @@ class TorchModuleConfig(BaseModel):
         return self.resolve_spec(base_dir=base_dir).pull()
 
     def resolve_environment(self, *, base_dir: Path | None = None) -> PythonEnvironment:
-        """Normalize ``env`` for an isolated model subprocess."""
-        return resolve_model_environment(self.env, base_dir=base_dir)
+        """Normalize ``env`` or ``python`` for an isolated model subprocess."""
+        return resolve_model_environment(
+            self.env, base_dir=base_dir, python=self.python
+        )
 
     def build_remote(
         self,
