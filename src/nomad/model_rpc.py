@@ -13,7 +13,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
-from .model_env import ModelEnvironment, PythonEnvironment
+from .model_env import ExistingEnvironment, ModelEnvironment, PythonEnvironment
 
 logger = logging.getLogger(__name__)
 _CLOSE_LOCK_GRACE_SECONDS = 0.25
@@ -62,11 +62,13 @@ class ModelProcess:
         self.timeout_seconds = timeout_seconds
         python = environment.ensure()
         child_env = dict(os.environ)
-        if isinstance(environment, ModelEnvironment):
+        isolated = isinstance(environment, ModelEnvironment | ExistingEnvironment)
+        if isolated:
             child_env.pop("PYTHONPATH", None)
             child_env.pop("PYTHONHOME", None)
-            venv = python.parent.parent
-            child_env["VIRTUAL_ENV"] = str(venv)
+            child_env.pop("VIRTUAL_ENV", None)
+            if isinstance(environment, ModelEnvironment) or environment.is_venv:
+                child_env["VIRTUAL_ENV"] = str(python.parent.parent)
             child_env["PATH"] = os.pathsep.join(
                 part for part in (str(python.parent), child_env.get("PATH")) if part
             )
@@ -79,9 +81,7 @@ class ModelProcess:
             encoding="utf-8",
             bufsize=1,
             env=child_env,
-            cwd=environment.base_dir
-            if isinstance(environment, ModelEnvironment)
-            else None,
+            cwd=environment.base_dir if isolated else None,
             start_new_session=os.name != "nt",
         )
         self._request_id = 0

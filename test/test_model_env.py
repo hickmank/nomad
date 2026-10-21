@@ -514,3 +514,56 @@ def _write_wheel(path: Path, *, name: str, files: dict[str, str]) -> None:
         for wheel_path, contents in wheel_files.items():
             wheel.writestr(wheel_path, contents)
         wheel.writestr(record_path, record + f"{record_path},,\n")
+
+
+def test_python_resolves_existing_interpreter_relative_to_base_dir(tmp_path: Path):
+    environment = model_env.resolve_model_environment(
+        None, base_dir=tmp_path, python="envs/yoke/bin/python"
+    )
+
+    assert isinstance(environment, model_env.ExistingEnvironment)
+    assert environment.python == tmp_path.resolve() / "envs/yoke/bin/python"
+    assert environment.base_dir == tmp_path.resolve()
+
+
+def test_python_keeps_interpreter_symlink(tmp_path: Path):
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    link = venv / "bin" / "python"
+    link.symlink_to(model_env.sys.executable)
+
+    environment = model_env.resolve_model_environment(
+        None, base_dir=tmp_path, python=str(link)
+    )
+
+    assert isinstance(environment, model_env.ExistingEnvironment)
+    assert environment.python == link
+    assert environment.is_venv
+    assert environment.ensure() == link
+
+
+def test_existing_environment_checksum_depends_on_interpreter(tmp_path: Path):
+    first = model_env.ExistingEnvironment(python=tmp_path / "a" / "bin" / "python")
+    same = model_env.ExistingEnvironment(
+        python=tmp_path / "a" / "bin" / "python", base_dir=tmp_path / "other"
+    )
+    second = model_env.ExistingEnvironment(python=tmp_path / "b" / "bin" / "python")
+
+    assert first.checksum == same.checksum
+    assert first.checksum != second.checksum
+
+
+def test_existing_environment_missing_interpreter_fails(tmp_path: Path):
+    environment = model_env.ExistingEnvironment(python=tmp_path / "missing" / "python")
+
+    assert not environment.is_venv
+    with pytest.raises(FileNotFoundError, match="interpreter not found"):
+        environment.ensure()
+
+
+def test_resolve_model_environment_rejects_env_and_python(tmp_path: Path):
+    with pytest.raises(ValueError, match="both env and python"):
+        model_env.resolve_model_environment(
+            ["demo"], base_dir=tmp_path, python="bin/python"
+        )

@@ -499,3 +499,74 @@ def _process_exists(pid: int) -> bool:
     if stat.is_file() and stat.read_text().split()[2] == "Z":
         return False
     return True
+
+
+def test_model_process_runs_in_existing_interpreter(monkeypatch, tmp_path: Path):
+    from nomad import model_env
+
+    module = tmp_path / "existing_fixture.py"
+    module.write_text(
+        """
+import os
+import sys
+from pydantic import BaseModel
+
+class Input(BaseModel):
+    value: int
+
+class Output(BaseModel):
+    cwd: str
+    virtual_env: str | None
+    pythonpath: str | None
+
+class Module:
+    def to(self, device):
+        return self
+
+class Tool:
+    name = "existing"
+    description = "existing interpreter fixture"
+    args_schema = Input
+    output_schema = Output
+    batch_size = 1
+
+    def __init__(self):
+        self.fm = Module()
+
+    @classmethod
+    def from_pretrained(cls, source):
+        return cls()
+
+    def batch_as_completed(self, inputs, max_concurency=None):
+        for _ in inputs:
+            yield Output(
+                cwd=os.getcwd(),
+                virtual_env=os.environ.get("VIRTUAL_ENV"),
+                pythonpath=os.environ.get("PYTHONPATH"),
+            )
+""",
+        encoding="utf-8",
+    )
+    # PYTHONPATH is stripped for isolated interpreters, so the fixture must be
+    # importable from the working directory (base_dir) instead.
+    monkeypatch.setenv("PYTHONPATH", "/should/not/leak")
+    monkeypatch.setenv("VIRTUAL_ENV", "/should/not/leak")
+    environment = model_env.ExistingEnvironment(
+        python=Path(sys.executable).absolute(), base_dir=tmp_path
+    )
+
+    remote = inspect_remote_model(
+        environment=environment,
+        model_class="existing_fixture.Tool",
+        source="weights",
+        tool_name=None,
+        batch_size=None,
+    )
+    with ModelProcess(environment) as process:
+        process.load(remote, "cpu")
+        [output] = process.run_batch([{"value": 1}], batch_size=1)
+
+    assert Path(output["cwd"]).resolve() == tmp_path.resolve()
+    assert output["pythonpath"] is None
+    expected_venv = str(environment.prefix) if environment.is_venv else None
+    assert output["virtual_env"] == expected_venv

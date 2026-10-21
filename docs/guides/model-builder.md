@@ -113,6 +113,11 @@ cached model-specific environment. The field accepts one PEP 508 requirement
 string or a list of them; requirements and project file paths are not
 supported, and direct references must use absolute URLs.
 
+If your model already lives in a pre-built environment (for example, a conda
+environment for its training framework), set the model's `python` to that
+environment's interpreter instead of `env`. Install `nomad-scifm` and your
+package into that environment so the model subprocess can import both.
+
 For demo deployments without an explicit model `env`, the host environment is
 defined by
 {repo_file}`container/demo/pyproject.toml <container/demo/pyproject.toml>`,
