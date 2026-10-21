@@ -475,6 +475,36 @@ async def test_tool_execution_does_not_block_event_loop(dummy_tool_factory):
 
 
 @pytest.mark.asyncio()
+async def test_manager_close_releases_inflight_and_queued_callers(dummy_tool_factory):
+    manager = TorchModelToolManager(device_provider=lambda: [torch.device("cpu")])
+    forward_started = threading.Event()
+    forward_release = threading.Event()
+    tool = dummy_tool_factory(
+        label="close-pending",
+        forward_started=forward_started,
+        forward_release=forward_release,
+    )
+    manager.register_tool(
+        "close-pending",
+        tool,
+        source=DummyTool.clone_sources["close-pending"],
+    )
+
+    inflight = asyncio.create_task(manager.call_tool("close-pending", {"value": 1}))
+    assert await asyncio.to_thread(forward_started.wait, 1.0)
+    queued = asyncio.create_task(manager.call_tool("close-pending", {"value": 2}))
+    await asyncio.sleep(0)
+
+    close = asyncio.create_task(manager.aclose())
+    for call in (inflight, queued):
+        with pytest.raises(RuntimeError, match="TorchModelToolManager is closed"):
+            await asyncio.wait_for(call, timeout=1.0)
+
+    forward_release.set()
+    await asyncio.wait_for(close, timeout=1.0)
+
+
+@pytest.mark.asyncio()
 async def test_tool_device_load_does_not_block_event_loop(dummy_tool_factory):
     device = make_accelerator_device(0)
     manager = TorchModelToolManager(device_provider=lambda: [device])

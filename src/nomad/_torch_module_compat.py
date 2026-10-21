@@ -34,7 +34,11 @@ def build_torch_module_fastmcp_tool(
     """Build a FastMCP tool from a TorchModuleTool-like object."""
 
     async def fn(**input_data: Any) -> Any:
-        args = tool.args_schema(**input_data)
+        args = (
+            input_data
+            if isinstance(tool.args_schema, dict)
+            else tool.args_schema(**input_data)
+        )
         result = invoke(args) if invoke is not None else tool(args)
         if inspect.isawaitable(result):
             return await result
@@ -44,9 +48,13 @@ def build_torch_module_fastmcp_tool(
         fn=fn,
         name=tool.name,
         description=tool.description,
-        parameters=tool.args_schema.model_json_schema(),
-        output_schema=tool.output_schema.model_json_schema(),
+        parameters=_json_schema(tool.args_schema),
+        output_schema=_json_schema(tool.output_schema),
     )
+
+
+def _json_schema(schema: type | dict[str, Any]) -> dict[str, Any]:
+    return schema if isinstance(schema, dict) else schema.model_json_schema()
 
 
 def add_torch_module_tool_to_fastmcp(

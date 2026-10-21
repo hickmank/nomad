@@ -11,6 +11,93 @@ from nomad import hub
 from nomad.export import ExportTarget, export_model_report, export_models_config
 
 
+def test_export_models_config_builds_pep508_environments(
+    monkeypatch,
+    tmp_path: Path,
+):
+    built_environments = []
+
+    def fake_ensure(self, *, cache_root=None):
+        built_environments.append((self, cache_root))
+        return cache_root / "venv" / "python"
+
+    monkeypatch.setattr("nomad.export.ModelEnvironment.ensure", fake_ensure)
+    config_dir = tmp_path / "config"
+    model_dir = config_dir / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.bin").write_text("weights", encoding="utf-8")
+
+    config_path = config_dir / "nomad.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "fmod_models:",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                "    tool_name: first-model",
+                "    env: demo-package==1.2",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                "    tool_name: second-model",
+                "    env:",
+                "      - other-package>=2",
+                "      - third-package[extra]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_path = export_models_config(config_path, tmp_path / "bundle")
+    exported = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert [entry["env"] for entry in exported["fmod_models"]] == [
+        "demo-package==1.2",
+        ["other-package>=2", "third-package[extra]"],
+    ]
+    assert [environment.requirements for environment, _ in built_environments] == [
+        ("demo-package==1.2",),
+        ("other-package>=2", "third-package[extra]"),
+    ]
+    assert all(
+        environment.base_dir == config_dir for environment, _ in built_environments
+    )
+    assert [cache_root for _, cache_root in built_environments] == [
+        tmp_path / "bundle",
+        tmp_path / "bundle",
+    ]
+
+
+def test_export_models_config_can_skip_venvs(monkeypatch, tmp_path: Path):
+    project_dir = tmp_path / "config"
+    model_dir = project_dir / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.bin").write_text("weights", encoding="utf-8")
+    config_path = project_dir / "nomad.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "fmod_models:",
+                "  - model_class: demo_package.Tool",
+                "    name_or_path: models/demo",
+                "    env: demo-package==1.2",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "nomad.export.ModelEnvironment.ensure",
+        lambda *args, **kwargs: pytest.fail("venv construction was not disabled"),
+    )
+
+    export_models_config(
+        config_path,
+        tmp_path / "bundle",
+        build_venvs=False,
+    )
+
+
 def test_export_models_config_https_rewrites_git_sources_and_normalizes_hf(
     monkeypatch, tmp_path: Path
 ):
@@ -23,7 +110,7 @@ def test_export_models_config_https_rewrites_git_sources_and_normalizes_hf(
     config_path.write_text(
         "\n".join(
             [
-                "tool_manager: {enabled: true}",
+                "tool_manager: {}",
                 "tools: []",
                 "fmod_models:",
                 "  - model_class: tests.DummyModel",
@@ -93,7 +180,7 @@ def test_export_models_config_oras_pushes_sources_and_rewrites_config(
     config_path.write_text(
         "\n".join(
             [
-                "tool_manager: {enabled: true}",
+                "tool_manager: {}",
                 "tools: []",
                 "fmod_models:",
                 "  - model_class: tests.DummyModel",
@@ -158,7 +245,7 @@ def test_export_models_config_rejects_duplicate_generated_tool_names(tmp_path: P
     config_path.write_text(
         "\n".join(
             [
-                "tool_manager: {enabled: true}",
+                "tool_manager: {}",
                 "tools: []",
                 "fmod_models:",
                 "  - model_class: tests.DummyModel",
@@ -215,7 +302,7 @@ def test_export_models_config_oras_requires_registry(tmp_path: Path):
     config_dir.mkdir()
     config_path = config_dir / "nomad.yml"
     config_path.write_text(
-        "tool_manager: {enabled: true}\ntools: []\nfmod_models: []\n",
+        "tool_manager: {}\ntools: []\nfmod_models: []\n",
         encoding="utf-8",
     )
 
@@ -234,7 +321,7 @@ def test_export_model_report_writes_cards_and_linked_descriptions(
     config_path.write_text(
         "\n".join(
             [
-                "tool_manager: {enabled: true}",
+                "tool_manager: {}",
                 "tools:",
                 "  - tool: tests.regular_report_tool",
                 "    name: regular-tool",
@@ -259,12 +346,10 @@ def test_export_model_report_writes_cards_and_linked_descriptions(
         def __init__(self, name: str):
             self.name = name
             self.description = f"Description for {name}."
+            self.source = tmp_path / name
 
-    def fake_build_tool(self, fm_config):
+    def fake_build_remote(self, fm_config):
         return DummyTool(fm_config.tool_name)
-
-    def fake_resolve_source(self, *, base_dir=None):
-        return tmp_path / self.tool_name
 
     def fake_read_model_card(self, tool_name):
         return cards[tool_name]
@@ -276,10 +361,7 @@ def test_export_model_report_writes_cards_and_linked_descriptions(
         "nomad.config.ToolConfig.fn", property(lambda self: regular_report_tool)
     )
 
-    monkeypatch.setattr("nomad.config.ServerConfig.build_tool", fake_build_tool)
-    monkeypatch.setattr(
-        "nomad.config.TorchModuleConfig.resolve_source", fake_resolve_source
-    )
+    monkeypatch.setattr("nomad.config.ServerConfig.build_remote", fake_build_remote)
     monkeypatch.setattr(
         "nomad.export.ModelCardLocator.read_model_card", fake_read_model_card
     )

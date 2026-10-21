@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import logging
 import pkgutil
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastmcp import FastMCP
 from fastmcp.tools import Tool as FastMCPTool
+from packaging.requirements import InvalidRequirement, Requirement
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    field_validator,
     model_validator,
 )
 
@@ -24,6 +28,8 @@ from ._torch_module_compat import (
 from .common.config_errors import load_config_mapping, validate_config_data
 from .common.name_sanitize import sanitize_mcp_name
 from .fm_base_tool import TorchModuleTool
+from .model_env import PythonEnvironment, resolve_model_environment
+from .model_rpc import RemoteModel, inspect_remote_model
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +107,53 @@ class TorchModuleConfig(BaseModel):
     batch_size: int | None = None
     """Optional maximum batch size override."""
 
+    env: str | list[str] | None = None
+    """One PEP 508 requirement or a list for an isolated model environment."""
+
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("env")
+    @classmethod
+    def _validate_environment_requirements(
+        cls,
+        value: str | list[str] | None,
+    ) -> str | list[str] | None:
+        requirements = [value] if isinstance(value, str) else value or []
+        for requirement in requirements:
+            if any(character in requirement for character in ("\r", "\n", "\0")):
+                raise ValueError(
+                    "PEP 508 requirements cannot contain line breaks or NUL bytes"
+                )
+            if requirement.strip().casefold() in {
+                "requirements.txt",
+                "pyproject.toml",
+            }:
+                raise ValueError(
+                    "Environment file paths are not supported; use a PEP 508 "
+                    "requirement"
+                )
+            try:
+                parsed = Requirement(requirement)
+            except InvalidRequirement as exc:
+                raise ValueError(
+                    f"Invalid PEP 508 requirement: {requirement!r}"
+                ) from exc
+            if parsed.url is not None:
+                url = urlsplit(parsed.url)
+                file_scheme = url.scheme == "file" or url.scheme.endswith("+file")
+                windows_drive = len(url.scheme) == 1 and parsed.url[1:2] == ":"
+                invalid_file_url = file_scheme and not url.path.startswith("/")
+                if (
+                    not url.scheme
+                    or windows_drive
+                    or invalid_file_url
+                    or (not file_scheme and not url.netloc)
+                ):
+                    raise ValueError(
+                        "PEP 508 direct references must use an absolute URL: "
+                        f"{requirement!r}"
+                    )
+        return value
 
     def resolve_spec(self, *, base_dir: Path | None = None) -> RepoSpec:
         """Resolve ``name_or_path`` to a normalized model source specification."""
@@ -110,6 +162,36 @@ class TorchModuleConfig(BaseModel):
     def resolve_source(self, *, base_dir: Path | None = None) -> str | Path:
         """Resolve ``name_or_path`` to a loadable local path."""
         return self.resolve_spec(base_dir=base_dir).pull()
+
+    def resolve_environment(self, *, base_dir: Path | None = None) -> PythonEnvironment:
+        """Normalize ``env`` for an isolated model subprocess."""
+        return resolve_model_environment(self.env, base_dir=base_dir)
+
+    def build_remote(
+        self,
+        *,
+        base_dir: Path | None = None,
+        rpc_timeout_seconds: float | None = 30.0,
+    ) -> RemoteModel:
+        """Inspect this model inside its configured subprocess environment."""
+        environment = self.resolve_environment(base_dir=base_dir)
+        spec = self.resolve_spec(base_dir=base_dir)
+        remote = inspect_remote_model(
+            environment=environment,
+            model_class=self.model_class,
+            source=spec.pull(),
+            tool_name=self.tool_name,
+            batch_size=self.batch_size,
+            timeout_seconds=rpc_timeout_seconds,
+        )
+        name = remote.name
+        if self.tool_name:
+            name = self.tool_name
+        elif getattr(spec, "scheme", None) == "hf":
+            name = spec.location
+        elif not name:
+            name = spec.location
+        return replace(remote, name=sanitize_mcp_name(name))
 
     def _instantiate_from_spec(self, spec: RepoSpec) -> TorchModuleTool:
         """Instantiate the configured model class from an already parsed source."""
@@ -219,10 +301,7 @@ class ToolConfig(BaseModel):
 
 
 class ToolManagerConfig(BaseModel):
-    """Configuration for the optional Torch model tool manager."""
-
-    enabled: bool = True
-    """Whether ``nomad serve`` should route model tools through the manager."""
+    """Configuration for Torch model scheduling and subprocess lifecycle."""
 
     idle_seconds: float | None = Field(default=300.0, ge=0)
     """Idle seconds before reducing a tool's device allocation by one slot. ``None`` disables device-slot idle eviction."""
@@ -239,6 +318,12 @@ class ToolManagerConfig(BaseModel):
     disk_idle_seconds: float | None = Field(default=600.0, ge=0)
     """Tool idle seconds after full offload before dropping the resident instance. ``None`` keeps resident instances loaded."""
 
+    venv_idle_seconds: float | None = Field(default=1200.0, ge=0)
+    """Idle seconds before terminating an isolated model subprocess. ``None`` disables subprocess idle eviction."""
+
+    rpc_timeout_seconds: float | None = Field(default=30.0, gt=0)
+    """Maximum seconds for a model subprocess RPC. ``None`` disables the deadline."""
+
     model_config = ConfigDict(extra="forbid")
 
     def instantiate(self, *, device_provider=None, **overrides):
@@ -253,7 +338,7 @@ class ToolManagerConfig(BaseModel):
         logger.debug("Initializing TorchModelToolManager")
         logger.debug(
             "TorchModelToolManager options: %s",
-            config.model_dump(exclude={"enabled"}),
+            config.model_dump(),
         )
         return TorchModelToolManager(config, device_provider=device_provider)
 
@@ -348,6 +433,13 @@ class ServerConfig(BaseModel):
     def build_tool(self, fmod: TorchModuleConfig, **overrides) -> TorchModuleTool:
         """Instantiate one model entry and apply configured tool overrides."""
         return fmod.build_tool(base_dir=self.context_dir, **overrides)
+
+    def build_remote(self, fmod: TorchModuleConfig) -> RemoteModel:
+        """Inspect one subprocess-backed model entry."""
+        return fmod.build_remote(
+            base_dir=self.context_dir,
+            rpc_timeout_seconds=self.tool_manager.rpc_timeout_seconds,
+        )
 
     @classmethod
     def from_file(cls, path: str | Path) -> ServerConfig:

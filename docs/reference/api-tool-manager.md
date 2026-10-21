@@ -6,6 +6,10 @@ single Nomad process. It keeps track of available devices, loads tools onto an
 accelerator when they need to run, and can offload idle tools back to CPU so
 GPU memory can be shared across a larger set of models.
 
+A device slot is the manager's internal record for one schedulable device. It
+tracks the model currently assigned to that device and, for isolated models,
+the Python subprocess serving it. There is no separate "slot manager" type.
+
 It also queues requests, batches calls for tools that support batching, and can
 register the managed tools with FastMCP.
 

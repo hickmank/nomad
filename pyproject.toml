@@ -20,6 +20,7 @@ dependencies = [
     "oras>=0.2.42,<1.0",
     "thefuzz[speedup]>=0.22.1",
     "requests>=2.32.2",
+    "packaging>=24.2",
 ]
 
 [project.optional-dependencies]

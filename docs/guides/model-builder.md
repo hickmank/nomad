@@ -86,8 +86,8 @@ deployment rules and packaging constraints live in the
 ## Create an Importable Package
 
 `nomad serve` loads your class or function by dotted import path, so that exact
-symbol must be importable in the same Python environment that launches the
-server.
+symbol must be importable in the model's configured `env`. When `env` is
+omitted, the model subprocess uses the same Python environment as the server.
 
 Minimal repository shape:
 
@@ -106,8 +106,15 @@ To quickly check, from the top-level `./my_pkg` directory, run:
 uv run python -c "from my_pkg.mcp import MyModelTool; print(MyModelTool)"
 ```
 
-For local development, install your package into the same environment you use
-to run `nomad serve`. For demo deployments, that environment is defined by
+For local development, either install your package into the environment used
+to run `nomad serve`, or set the model's `env` to a PEP 508 direct reference
+such as `my-pkg @ file:///absolute/path/to/my_pkg`. Nomad installs `env` into a
+cached model-specific environment. The field accepts one PEP 508 requirement
+string or a list of them; requirements and project file paths are not
+supported, and direct references must use absolute URLs.
+
+For demo deployments without an explicit model `env`, the host environment is
+defined by
 {repo_file}`container/demo/pyproject.toml <container/demo/pyproject.toml>`,
 so your package must be added there as a pinned dependency. If the package
 comes from another repository or a local checkout, also add a matching

@@ -96,7 +96,6 @@ def test_server_config_resolves_entries(monkeypatch):
             {"tool": f"{module_name}.DummyTool", "tool_kwargs": {"factor": 3}},
         ],
         "tool_manager": {
-            "enabled": True,
             "idle_seconds": 10.0,
             "gc_idle_seconds": 30.0,
             "disk_idle_seconds": 60.0,
@@ -107,7 +106,6 @@ def test_server_config_resolves_entries(monkeypatch):
     config = ServerConfig.model_validate(config_data)
 
     assert isinstance(config.tool_manager, ToolManagerConfig)
-    assert config.tool_manager.enabled is True
     assert config.search_tool.expose is False
     assert config.search_tool.weights.prefix_name == 8.0
     manager = config.tool_manager.instantiate()
@@ -180,20 +178,94 @@ def test_tool_config_registration_raises_for_broken_tool_import():
 
 def test_tool_manager_config_rejects_unknown_options():
     with pytest.raises(ValidationError) as exc_info:
-        ToolManagerConfig.model_validate({"enabled": True, "typo_seconds": 10})
+        ToolManagerConfig.model_validate({"typo_seconds": 10})
 
     assert "Extra inputs are not permitted" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
     "field",
-    ["idle_seconds", "gc_idle_seconds", "disk_idle_seconds"],
+    ["idle_seconds", "gc_idle_seconds", "disk_idle_seconds", "venv_idle_seconds"],
 )
 def test_tool_manager_config_rejects_negative_seconds(field: str):
     with pytest.raises(ValidationError) as exc_info:
-        ToolManagerConfig.model_validate({"enabled": True, field: -1})
+        ToolManagerConfig.model_validate({field: -1})
 
     assert "greater than or equal to 0" in str(exc_info.value)
+
+
+def test_tool_manager_config_defaults_venv_idle_seconds():
+    config = ToolManagerConfig()
+
+    assert config.venv_idle_seconds == 1200.0
+    assert config.rpc_timeout_seconds == 30.0
+
+
+def test_tool_manager_config_rejects_removed_enabled_flag():
+    with pytest.raises(ValidationError) as exc_info:
+        ToolManagerConfig.model_validate({"enabled": False})
+
+    assert "Extra inputs are not permitted" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_tool_manager_config_rejects_nonpositive_rpc_timeout(value: float):
+    with pytest.raises(ValidationError) as exc_info:
+        ToolManagerConfig.model_validate({"rpc_timeout_seconds": value})
+
+    assert "greater than 0" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ("./requirements.txt", "Invalid PEP 508 requirement"),
+        ("-r requirements.txt", "Invalid PEP 508 requirement"),
+        (["demo-package>=1", "./local"], "Invalid PEP 508 requirement"),
+        ("requirements.txt", "Environment file paths are not supported"),
+        ("pyproject.toml", "Environment file paths are not supported"),
+        ("demo @ ./local", "direct references must use an absolute URL"),
+        ("demo @ file:./local", "direct references must use an absolute URL"),
+        ("demo @ https:relative", "direct references must use an absolute URL"),
+        ("demo @ git+file:./local", "direct references must use an absolute URL"),
+        ("demo @ ftp:relative", "direct references must use an absolute URL"),
+        ("demo @ hg+https:relative", "direct references must use an absolute URL"),
+        (r"demo @ C:\local", "direct references must use an absolute URL"),
+        ("demo-package\n--extra-index-url https://example.com", "line breaks"),
+        ("demo-package\0other-package", "NUL bytes"),
+    ],
+)
+def test_torch_module_config_rejects_non_pep508_environments(env, message):
+    with pytest.raises(ValidationError) as exc_info:
+        TorchModuleConfig(
+            model_class="demo.Tool",
+            name_or_path="demo/model",
+            env=env,
+        )
+
+    assert message in str(exc_info.value)
+
+
+def test_torch_module_config_accepts_pep508_environment_list():
+    config = TorchModuleConfig(
+        model_class="demo.Tool",
+        name_or_path="demo/model",
+        env=["demo-package>=1", "other-package[extra]"],
+    )
+
+    assert config.env == ["demo-package>=1", "other-package[extra]"]
+
+
+def test_torch_module_config_accepts_absolute_direct_reference():
+    requirement = "demo-package @ file:///opt/demo-package"
+
+    config = TorchModuleConfig(
+        model_class="demo.Tool",
+        name_or_path="demo/model",
+        env=requirement,
+    )
+
+    assert config.env == requirement
 
 
 def test_torch_module_config_accepts_legacy_ursa_tool(monkeypatch):
@@ -310,7 +382,7 @@ def test_server_config_from_file_resolves_relative_model_paths_from_config_dir(
     config_path.write_text(
         "\n".join(
             [
-                "tool_manager: {enabled: true}",
+                "tool_manager: {}",
                 "tools: []",
                 "fmod_models:",
                 f"  - model_class: {module_name}.DummyModel",
@@ -499,7 +571,7 @@ def test_server_config_rejects_legacy_expose_search_tool_flag():
             {
                 "fmod_models": [],
                 "tools": [],
-                "tool_manager": {"enabled": True},
+                "tool_manager": {},
                 "expose_search_tool": True,
             }
         )
@@ -540,7 +612,7 @@ def test_server_config_from_file_wrong_type_describes_expected_shape(
 ):
     config_path = tmp_path / "nomad.yml"
     config_path.write_text(
-        "fmod_models: nope\ntools: []\ntool_manager: {enabled: true}\n",
+        "fmod_models: nope\ntools: []\ntool_manager: {}\n",
         encoding="utf-8",
     )
 
@@ -555,7 +627,7 @@ def test_server_config_from_file_range_error_describes_bound(tmp_path: Path):
     config_path.write_text(
         "fmod_models: []\n"
         "tools: []\n"
-        "tool_manager: {enabled: true}\n"
+        "tool_manager: {}\n"
         "search_tool: {candidate_limit: 0}\n",
         encoding="utf-8",
     )
@@ -574,7 +646,7 @@ def test_server_config_accepts_search_tool_weights():
         {
             "fmod_models": [],
             "tools": [],
-            "tool_manager": {"enabled": True},
+            "tool_manager": {},
             "search_tool": {
                 "expose": True,
                 "candidate_limit": 75,

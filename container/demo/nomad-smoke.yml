@@ -1,5 +1,4 @@
-tool_manager:
-  enabled: true
+tool_manager: {}
 search_tool:
   expose: true
 tools:

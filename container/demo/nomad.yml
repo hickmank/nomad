@@ -1,5 +1,4 @@
 tool_manager:
-  enabled: true
   idle_seconds: 120
   max_pending_per_tool: 50000
 search_tool:

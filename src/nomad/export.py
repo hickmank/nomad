@@ -15,10 +15,11 @@ from fastmcp.tools import Tool as FastMCPTool
 
 from nomad.common.config_errors import ConfigError
 from nomad.common.name_sanitize import sanitize_export_name, sanitize_mcp_name
-from nomad.config import ServerConfig
+from nomad.config import ServerConfig, TorchModuleConfig
 from nomad.hub import RepoSpec
 from nomad.logging_utils import configure_root_logging, parse_log_level
 from nomad.model_cards import ModelCardLocator
+from nomad.model_env import ModelEnvironment
 
 LogLevelName = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LOGGER = logging.getLogger(__name__)
@@ -244,6 +245,21 @@ def _validate_unique_tool_names(raw_models: list[Any]) -> None:
         used_tool_names[mcp_name] = (index, tool_name)
 
 
+def _build_exported_model_environments(
+    models: list[TorchModuleConfig],
+    *,
+    base_dir: Path,
+    cache_root: Path,
+) -> None:
+    """Materialize explicit model environments inside an export bundle."""
+    for model in models:
+        if model.env is None:
+            continue
+        environment = model.resolve_environment(base_dir=base_dir)
+        assert isinstance(environment, ModelEnvironment)
+        environment.ensure(cache_root=cache_root)
+
+
 def export_models_config(
     config_path: Path,
     output_dir: Path,
@@ -251,6 +267,7 @@ def export_models_config(
     to: ExportTarget = ExportTarget.DISK,
     oras_registry: str | None = None,
     pin: bool = True,
+    build_venvs: bool = True,
 ) -> Path:
     """Export local assets and rewrite ``nomad.yml`` for the requested target."""
     config_path = config_path.expanduser()
@@ -264,6 +281,12 @@ def export_models_config(
     )
 
     raw_models = exported_data.get("fmod_models", []) or []
+    if build_venvs:
+        _build_exported_model_environments(
+            config.fmod_models,
+            base_dir=config.context_dir,
+            cache_root=output_dir,
+        )
     entry_exports, source_exports = _collect_model_exports(
         raw_models,
         base_dir=config.context_dir,
@@ -315,13 +338,13 @@ def export_model_report(config_path: Path, output_dir: Path) -> Path:
     used_names: set[str] = set()
 
     for fm_config in config.fmod_models:
-        tool = config.build_tool(fm_config)
+        tool = config.build_remote(fm_config)
         assert tool.name is not None
         if tool.name in used_names:
             raise ValueError(f"Duplicate model tool name '{tool.name}' in report")
         used_names.add(tool.name)
 
-        source = fm_config.resolve_source(base_dir=config.context_dir)
+        source = Path(tool.source)
         locator.register(tool.name, source)
         card_path = output_dir / f"{tool.name}.md"
         card_path.write_text(locator.read_model_card(tool.name), encoding="utf-8")
@@ -413,14 +436,23 @@ def export(
             help="Export model cards and a linked README instead of a deployment bundle.",
         ),
     ] = False,
+    venv: Annotated[
+        bool,
+        typer.Option(
+            "--venv/--no-venv",
+            help="Build explicit model environments under `<output>/venv`.",
+        ),
+    ] = True,
 ):
     """Create a deployment bundle from a Nomad config.
 
     Nomad copies or downloads every configured model into `<output>/models` and
-    writes a rewritten `<output>/nomad.yml`. Use `--to https` to keep remote
-    models remote while rewriting git+ssh sources to git+https transport. Use
-    `--to oras --oras-registry REGISTRY/REPOSITORY` to push models to ORAS and
-    rewrite the config to pinned ORAS artifact URIs.
+    builds explicit model environments under `<output>/venv`, then writes a
+    rewritten `<output>/nomad.yml`. Use `--no-venv` to skip environment
+    construction. Use `--to https` to keep remote models remote while rewriting
+    git+ssh sources to git+https transport. Use `--to oras --oras-registry
+    REGISTRY/REPOSITORY` to push models to ORAS and rewrite the config to pinned
+    ORAS artifact URIs.
     """
     numeric_level = parse_log_level(log_level)
     configure_root_logging(stderr_level=numeric_level)
@@ -430,9 +462,14 @@ def export(
             export_model_report(config, output)
         else:
             export_models_config(
-                config, output, to=to, oras_registry=oras_registry, pin=pin
+                config,
+                output,
+                to=to,
+                oras_registry=oras_registry,
+                pin=pin,
+                build_venvs=venv,
             )
     except ConfigError as exc:
         raise click.ClickException(f"Failed to load config: {exc}") from exc
-    except ValueError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
