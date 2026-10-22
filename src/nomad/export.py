@@ -13,7 +13,8 @@ import typer
 import yaml
 from fastmcp.tools import Tool as FastMCPTool
 
-from nomad.common.config_errors import ConfigError
+from nomad.common.config_errors import ConfigError, load_config_mapping
+from nomad.common.env import ENV_SUB_REGEX
 from nomad.common.name_sanitize import sanitize_export_name, sanitize_mcp_name
 from nomad.config import ServerConfig, TorchModuleConfig
 from nomad.hub import RepoSpec
@@ -260,23 +261,46 @@ def _build_exported_model_environments(
         environment.ensure(cache_root=cache_root)
 
 
+def _source_python_values(config_path: Path) -> list[Any]:
+    """Return each model's ``python`` value as written, before env interpolation."""
+    _, data = load_config_mapping(
+        config_path,
+        supported_suffixes=(".yaml", ".yml", ".json"),
+        empty_hint="a mapping with server settings",
+    )
+    entries = data.get("fmod_models") or []
+    return [
+        entry.get("python") if isinstance(entry, dict) else None for entry in entries
+    ]
+
+
 def _pin_existing_interpreters(
     raw_models: list[Any],
     models: list[TorchModuleConfig],
     base_dir: Path,
+    source_pythons: list[Any],
 ) -> None:
-    """Rewrite ``python`` paths as absolute; the bundle cannot carry them."""
-    for raw_entry, model in zip(raw_models, models, strict=True):
+    """Keep ``python`` placeholders, or pin paths as absolute; never bundle them.
+
+    A value with ``${VAR}`` placeholders is written unexpanded so each
+    deployment resolves its own interpreter.
+    """
+    for raw_entry, model, source_python in zip(
+        raw_models, models, source_pythons, strict=True
+    ):
         if model.python is None or not isinstance(raw_entry, dict):
             continue
         environment = model.resolve_environment(base_dir=base_dir)
         assert isinstance(environment, ExistingEnvironment)
-        raw_entry["python"] = str(environment.python)
+        if isinstance(source_python, str) and ENV_SUB_REGEX.search(source_python):
+            raw_entry["python"] = source_python
+        else:
+            raw_entry["python"] = str(environment.python)
         LOGGER.warning(
             "Model '%s' uses external interpreter %s; the export bundle is not "
             "self-contained for this model",
             model.tool_name or model.name_or_path,
-            environment.python,
+            raw_entry["python"],
         )
 
 
@@ -301,7 +325,12 @@ def export_models_config(
     )
 
     raw_models = exported_data.get("fmod_models", []) or []
-    _pin_existing_interpreters(raw_models, config.fmod_models, config.context_dir)
+    _pin_existing_interpreters(
+        raw_models,
+        config.fmod_models,
+        config.context_dir,
+        _source_python_values(config_path),
+    )
     if build_venvs:
         _build_exported_model_environments(
             config.fmod_models,

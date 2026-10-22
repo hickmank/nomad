@@ -98,6 +98,51 @@ def test_export_models_config_can_skip_venvs(monkeypatch, tmp_path: Path):
     )
 
 
+def test_export_models_config_keeps_python_placeholders(
+    monkeypatch, tmp_path: Path, caplog
+):
+    config_dir = tmp_path / "config"
+    model_dir = config_dir / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.bin").write_text("weights", encoding="utf-8")
+    config_path = config_dir / "nomad.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "fmod_models:",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                "    tool_name: placeholder-model",
+                "    python: ${MODEL_ENV}/bin/python",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                "    tool_name: relative-model",
+                "    python: envs/demo/bin/python",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                "    tool_name: default-model",
+                "    python: ${OTHER_ENV:/opt/envs/other}/bin/python",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MODEL_ENV", "/export-host/envs/yoke")
+    monkeypatch.delenv("OTHER_ENV", raising=False)
+
+    with caplog.at_level("WARNING", logger="nomad"):
+        output_path = export_models_config(config_path, tmp_path / "bundle")
+
+    exported = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert [entry["python"] for entry in exported["fmod_models"]] == [
+        "${MODEL_ENV}/bin/python",
+        str(config_dir.resolve() / "envs" / "demo" / "bin" / "python"),
+        "${OTHER_ENV:/opt/envs/other}/bin/python",
+    ]
+    assert "/export-host" not in output_path.read_text(encoding="utf-8")
+    assert "${MODEL_ENV}/bin/python; the export bundle is not" in caplog.text
+
+
 def test_export_models_config_https_rewrites_git_sources_and_normalizes_hf(
     monkeypatch, tmp_path: Path
 ):

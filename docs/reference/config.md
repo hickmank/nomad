@@ -84,9 +84,15 @@ models. Set `NOMAD_CACHE=<output>` when serving the exported config so those
 environments are reused. Build the bundle at its final absolute deployment path
 (for example, `nomad export nomad.yml /opt/nomad`): virtual environments are not
 relocatable and must run with a Python runtime compatible with the one used for
-the export. Pass `--no-venv` to omit them from an export. A model's `python`
-interpreter is never copied into the bundle; `nomad export` rewrites it as an
-absolute path and warns that the bundle is not self-contained for that model.
+the export. Pass `--no-venv` to omit them from an export.
+
+A model's `python` interpreter is never copied into the bundle, and `nomad
+export` warns that the bundle is not self-contained for that model. Values that
+use `${VAR}` or `${VAR:DEFAULT}` placeholders are written to the exported config
+unexpanded, so each deployment resolves the interpreter from its own
+environment; set the variable when serving the bundle. Other values are
+rewritten as absolute paths on the export host. To ship a model's full Python
+environment, build a container image instead.
 
 | Name | Example |
 | --- | --- |
