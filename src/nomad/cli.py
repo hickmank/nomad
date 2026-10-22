@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 import click
 import typer
@@ -24,9 +24,7 @@ from .logging_utils import configure_root_logging, parse_log_level
 from .model_cards import ModelCardLocator, register_model_card_tool
 from .otel import configure_otel, shutdown_otel
 from .tool_search import register_search_tool
-
-if TYPE_CHECKING:
-    from .torch_tool_manager import TorchModelToolManager
+from .torch_tool_manager import TorchModelToolManager
 
 LogLevelName = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ServeTransport = Literal["stdio", "http", "streamable-http", "streamable_http"]
@@ -72,7 +70,7 @@ def _normalize_serve_transport(transport: str) -> str:
     return normalized
 
 
-def _format_visible_devices(manager: "TorchModelToolManager") -> str:
+def _format_visible_devices(manager: TorchModelToolManager) -> str:
     formatted: list[str] = []
     for info in manager.accelerator_info:
         if info.name and info.name != str(info.device):
