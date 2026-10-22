@@ -554,6 +554,19 @@ def test_existing_environment_checksum_depends_on_interpreter(tmp_path: Path):
     assert first.checksum != second.checksum
 
 
+def test_existing_environment_checksum_includes_pyvenv_cfg(tmp_path: Path):
+    environment = model_env.ExistingEnvironment(python=tmp_path / "bin" / "python")
+    without_cfg = environment.checksum
+    config = tmp_path / "pyvenv.cfg"
+    config.write_text("version_info = 3.13.5\n", encoding="utf-8")
+    first = environment.checksum
+    config.write_text("version_info = 3.14.0\n", encoding="utf-8")
+
+    assert environment.is_venv
+    assert first != without_cfg
+    assert environment.checksum != first
+
+
 def test_existing_environment_missing_interpreter_fails(tmp_path: Path):
     environment = model_env.ExistingEnvironment(python=tmp_path / "missing" / "python")
 

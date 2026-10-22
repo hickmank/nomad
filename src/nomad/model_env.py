@@ -171,7 +171,13 @@ class ExistingEnvironment:
 
     @property
     def checksum(self) -> str:
-        return blake2b(f"{_HASH_PREFIX}existing-{self.python}".encode()).hexdigest()
+        digest = blake2b()
+        digest.update(f"{_HASH_PREFIX}existing-".encode())
+        digest.update(str(self.python).encode())
+        if self.is_venv:
+            digest.update(b"\0pyvenv-cfg\0")
+            digest.update((self.prefix / "pyvenv.cfg").read_bytes())
+        return digest.hexdigest()
 
     @property
     def prefix(self) -> Path:
