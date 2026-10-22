@@ -3,12 +3,13 @@ from __future__ import annotations
 import contextlib
 import gc
 import importlib
-import json
 import os
 import sys
 import traceback
 from collections.abc import Mapping
 from typing import Any, TextIO
+
+from nomad.jsonrpc import Dispatcher, Handler, encode_line, encode_response
 
 
 def _resolve_symbol(dotted_path: str) -> Any:
@@ -21,29 +22,19 @@ def _resolve_symbol(dotted_path: str) -> Any:
 class ModelWorker:
     def __init__(self) -> None:
         self.tool: Any = None
+        self.should_stop = False
 
-    def dispatch(self, method: str, params: Mapping[str, Any]) -> Any:
-        if method == "load":
-            return self.load(params)
-        if method == "run_batch":
-            return self.run_batch(params)
-        if method == "offload":
-            self.offload()
-            return None
-        if method == "unload":
-            self._discard_tool()
-            return None
-        if method == "clear_cache":
-            self.clear_cache()
-            return None
-        if method == "device_memory":
-            return self.device_memory(params)
-        if method == "set_batch_size":
-            self._require_tool().batch_size = max(1, int(params["batch_size"]))
-            return None
-        if method == "shutdown":
-            return None
-        raise ValueError(f"Unknown model worker method '{method}'")
+    def handlers(self) -> dict[str, Handler]:
+        return {
+            "load": self.load,
+            "run_batch": self.run_batch,
+            "offload": lambda _params: self.offload(),
+            "unload": lambda _params: self._discard_tool(),
+            "clear_cache": lambda _params: self.clear_cache(),
+            "device_memory": self.device_memory,
+            "set_batch_size": self.set_batch_size,
+            "shutdown": self.shutdown,
+        }
 
     def load(self, params: Mapping[str, Any]) -> dict[str, Any]:
         self._discard_tool()
@@ -87,6 +78,12 @@ class ModelWorker:
             tool.output_schema.model_validate(output).model_dump(mode="json")
             for output in outputs
         ]
+
+    def set_batch_size(self, params: Mapping[str, Any]) -> None:
+        self._require_tool().batch_size = max(1, int(params["batch_size"]))
+
+    def shutdown(self, _params: Mapping[str, Any]) -> None:
+        self.should_stop = True
 
     def offload(self) -> None:
         tool = self._require_tool()
@@ -151,13 +148,8 @@ class ModelWorker:
         return self.tool
 
 
-def _response(request_id: Any, *, result: Any = None, error: Any = None) -> dict:
-    payload = {"jsonrpc": "2.0", "id": request_id}
-    if error is None:
-        payload["result"] = result
-    else:
-        payload["error"] = error
-    return payload
+def _print_exception(exc: Exception) -> None:
+    traceback.print_exception(exc, file=sys.stderr)
 
 
 def main(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
@@ -177,24 +169,13 @@ def main(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
 
     try:
         with contextlib.redirect_stdout(sys.stderr):
+            dispatcher = Dispatcher(worker.handlers(), on_error=_print_exception)
             for line in stdin:
-                request: dict[str, Any] = {}
-                should_stop = False
-                try:
-                    request = json.loads(line)
-                    method = request.get("method")
-                    should_stop = method == "shutdown"
-                    result = worker.dispatch(method, request.get("params", {}))
-                    response = _response(request.get("id"), result=result)
-                except Exception as exc:  # noqa: BLE001
-                    traceback.print_exc(file=sys.stderr)
-                    response = _response(
-                        request.get("id"),
-                        error={"code": -32000, "message": str(exc)},
-                    )
-                protocol_stdout.write(json.dumps(response) + "\n")
-                protocol_stdout.flush()
-                if should_stop:
+                response = dispatcher.dispatch(line)
+                if response is not None:
+                    protocol_stdout.write(encode_response(response, encode_line))
+                    protocol_stdout.flush()
+                if worker.should_stop:
                     break
     finally:
         if close_protocol_stdout:

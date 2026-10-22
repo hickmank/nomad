@@ -15,13 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from .. import metrics as nomad_metrics
+from ..jsonrpc import Dispatcher, encode_frame, encode_response, read_frame
 from ..otel import get_tracer, set_span_error, set_span_ok
 from .config import GatewayRuntimeOptions
 from .middleware import (
     MiddlewareChain,
     ToolCallContext,
 )
-from .runtime.bridge_framing import encode_bridge_message, read_bridge_message
+from .runtime.runner import _default_serializer
 from .tool_index import ToolIndex
 from .upstream import UpstreamProxy
 from .wrappers import WrapperGenerator
@@ -93,6 +94,14 @@ class SandboxResult:
     tool_calls: list[dict[str, Any]]
 
 
+def _encode_bridge_frame(payload: Mapping[str, Any]) -> bytes:
+    return encode_frame(payload, default=_default_serializer)
+
+
+def _log_bridge_error(exc: Exception) -> None:
+    logger.error("Bridge request failed", exc_info=exc)
+
+
 class SandboxBridge:
     """JSON-RPC bridge between sandbox runtime and gateway."""
 
@@ -140,48 +149,25 @@ class SandboxBridge:
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ):
-        request: Mapping[str, Any] = {}
+        dispatcher = Dispatcher(
+            {
+                "call_tool": self._handle_call_tool,
+                "ensure_wrapper": self._handle_ensure_wrapper,
+            },
+            on_error=_log_bridge_error,
+        )
         try:
             while True:
-                request = await read_bridge_message(reader)
-                if request is None:
+                message = await read_frame(reader)
+                if message is None:
                     break
-                try:
-                    response = await self._dispatch(request)
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("Bridge request failed")
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": request.get("id"),
-                        "error": {"code": -32000, "message": str(exc)},
-                    }
-                try:
-                    writer.write(encode_bridge_message(response))
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("Bridge response failed")
-                    fallback = {
-                        "jsonrpc": "2.0",
-                        "id": request.get("id"),
-                        "error": {"code": -32000, "message": str(exc)},
-                    }
-                    writer.write(encode_bridge_message(fallback))
-                await writer.drain()
+                response = await dispatcher.dispatch_async(message)
+                if response is not None:
+                    writer.write(encode_response(response, _encode_bridge_frame))
+                    await writer.drain()
         finally:
             writer.close()
             await writer.wait_closed()
-
-    async def _dispatch(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        method = request.get("method")
-        params = request.get("params", {})
-        request_id = request.get("id")
-
-        if method == "call_tool":
-            result = await self._handle_call_tool(params)
-            return {"jsonrpc": "2.0", "id": request_id, "result": result}
-        if method == "ensure_wrapper":
-            result = await self._handle_ensure_wrapper(params)
-            return {"jsonrpc": "2.0", "id": request_id, "result": result}
-        raise ValueError(f"Unknown bridge method '{method}'")
 
     async def _handle_call_tool(self, params: Mapping[str, Any]) -> Any:
         server = params["server"]

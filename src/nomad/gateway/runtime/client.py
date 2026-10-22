@@ -9,8 +9,18 @@ import sys
 import threading
 from typing import Any
 
-from .bridge_framing import encode_bridge_message, read_bridge_message
+from nomad.jsonrpc import (
+    JSONRPCError,
+    ProtocolError,
+    decode,
+    encode_frame,
+    make_request,
+    parse_response,
+    read_frame,
+)
+
 from .constants import DEFAULT_WRAPPERS_PACKAGE
+from .runner import _default_serializer
 from .wrapper_factory import build_server_module
 
 BRIDGE_ENV = "NOMAD_MCP_GATEWAY_BRIDGE"
@@ -53,27 +63,21 @@ class BridgeClient:
         reader, writer = await asyncio.open_connection(self._host, self._port)
         try:
             request_id = self._next_id()
-            payload = {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            }
+            payload = make_request(method, params, request_id=request_id)
             try:
-                writer.write(encode_bridge_message(payload))
+                writer.write(encode_frame(payload, default=_default_serializer))
             except ValueError as exc:
                 raise BridgeError(str(exc)) from exc
             await writer.drain()
             try:
-                response = await read_bridge_message(reader)
-            except (ConnectionError, ValueError) as exc:
+                message = await read_frame(reader)
+                if message is None:
+                    raise BridgeError("Bridge closed connection unexpectedly")
+                return parse_response(decode(message), expected_id=request_id)
+            except (ConnectionError, ProtocolError) as exc:
                 raise BridgeError(str(exc)) from exc
-            if response is None:
-                raise BridgeError("Bridge closed connection unexpectedly")
-            if "error" in response:
-                message = response["error"].get("message", "bridge error")
-                raise BridgeError(message)
-            return response.get("result")
+            except JSONRPCError as exc:
+                raise BridgeError(exc.message) from exc
         finally:
             writer.close()
             await writer.wait_closed()

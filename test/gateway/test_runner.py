@@ -738,6 +738,8 @@ def test_runtime_entrypoints_import_only_runtime_and_stdlib(
         allowed_files=(
             wrappers_root / "nomad" / "__init__.py",
             wrappers_root / "nomad" / "gateway" / "__init__.py",
+            # Shared JSON-RPC 2.0 support; its own imports are traced too.
+            wrappers_root / "nomad" / "jsonrpc.py",
             wrappers_package_root / "__init__.py",
         ),
         allowed_prefixes=("mcp_tools",),

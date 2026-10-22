@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import signal
@@ -13,6 +12,14 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
 
+from .jsonrpc import (
+    JSONRPCError,
+    ProtocolError,
+    decode,
+    encode_line,
+    make_request,
+    parse_response,
+)
 from .model_env import ExistingEnvironment, ModelEnvironment, PythonEnvironment
 
 logger = logging.getLogger(__name__)
@@ -126,12 +133,7 @@ class ModelProcess:
                 raise ModelRPCError(self._exited_message())
             self._request_id += 1
             request_id = self._request_id
-            payload = {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params or {},
-            }
+            payload = make_request(method, params, request_id=request_id)
             self._write_request(payload, method=method, deadline=deadline)
 
             response_timeout = (
@@ -146,24 +148,14 @@ class ModelProcess:
             if response_line is None:
                 raise ModelRPCError(self._exited_message())
             try:
-                response = json.loads(response_line)
-            except json.JSONDecodeError as exc:
+                return parse_response(decode(response_line), expected_id=request_id)
+            except ProtocolError as exc:
                 self._terminate_process()
                 raise ModelRPCError(
-                    f"Model worker returned invalid JSON: {response_line.rstrip()}"
+                    f"Model worker sent an invalid JSON-RPC response: {exc}"
                 ) from exc
-            if not isinstance(response, dict):
-                self._terminate_process()
-                raise ModelRPCError("Model worker returned a non-object response")
-            if response.get("jsonrpc") != "2.0" or response.get("id") != request_id:
-                self._terminate_process()
-                raise ModelRPCError(
-                    "Model worker returned a mismatched JSON-RPC response"
-                )
-            if error := response.get("error"):
-                message = error.get("message", "model worker error")
-                raise ModelRPCError(str(message))
-            return response.get("result")
+            except JSONRPCError as exc:
+                raise ModelRPCError(exc.message) from exc
         finally:
             self._lock.release()
 
@@ -176,7 +168,7 @@ class ModelProcess:
     ) -> None:
         """Write one request without allowing a blocked pipe to evade the deadline."""
         assert self._process.stdin is not None
-        serialized = json.dumps(payload) + "\n"
+        serialized = encode_line(payload)
         errors: list[BaseException] = []
         completed = threading.Event()
 
@@ -250,15 +242,9 @@ class ModelProcess:
                     assert self._process.stdin is not None
                     self._request_id += 1
                     self._process.stdin.write(
-                        json.dumps(
-                            {
-                                "jsonrpc": "2.0",
-                                "id": self._request_id,
-                                "method": "shutdown",
-                                "params": {},
-                            }
+                        encode_line(
+                            make_request("shutdown", request_id=self._request_id)
                         )
-                        + "\n"
                     )
                     self._process.stdin.flush()
                     self._process.wait(timeout=_PROCESS_EXIT_GRACE_SECONDS)

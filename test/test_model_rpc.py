@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import os
 import sys
 import threading
@@ -14,6 +16,7 @@ from fastmcp import FastMCP
 from pydantic import BaseModel, ValidationError
 
 from nomad.config import ToolManagerConfig
+from nomad.jsonrpc import METHOD_NOT_FOUND, SERVER_ERROR
 from nomad.model_env import ModelEnvironment
 from nomad.model_rpc import (
     ModelProcess,
@@ -22,6 +25,7 @@ from nomad.model_rpc import (
     inspect_remote_model,
 )
 from nomad.model_worker import ModelWorker
+from nomad.model_worker import main as model_worker_main
 from nomad.torch_tool_manager import TorchModelToolManager
 
 
@@ -115,6 +119,28 @@ def test_model_worker_validates_outputs_against_declared_schema():
 
     with pytest.raises(ValidationError, match="value"):
         worker.run_batch({"inputs": [{"value": 2}], "batch_size": 1})
+
+
+def test_model_worker_main_speaks_json_rpc_until_shutdown():
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "missing", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "offload", "params": {}},
+        {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
+        {"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": {}},
+    ]
+    stdin = io.StringIO("".join(json.dumps(request) + "\n" for request in requests))
+    stdout = io.StringIO()
+
+    assert model_worker_main(stdin, stdout) == 0
+
+    responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert [response["id"] for response in responses] == [1, 2, 3]
+    assert responses[0]["error"]["code"] == METHOD_NOT_FOUND
+    assert responses[1]["error"] == {
+        "code": SERVER_ERROR,
+        "message": "No model is loaded",
+    }
+    assert responses[2] == {"jsonrpc": "2.0", "id": 3, "result": None}
 
 
 @pytest.mark.asyncio
@@ -507,6 +533,8 @@ def test_model_process_runs_in_existing_interpreter(monkeypatch, tmp_path: Path)
     module = tmp_path / "existing_fixture.py"
     module.write_text(
         """
+import io
+import json
 import os
 import sys
 from pydantic import BaseModel
