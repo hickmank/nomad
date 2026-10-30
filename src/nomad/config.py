@@ -114,7 +114,8 @@ class TorchModuleConfig(BaseModel):
     """Existing interpreter (venv or conda) to run the model in, instead of ``env``.
 
     Relative paths resolve against the configuration file's directory. The
-    interpreter must be able to import ``nomad`` and ``model_class``.
+    interpreter must be able to import ``nomad`` and ``model_class``. Intended
+    for development only: a server that relies on it is not deployable by itself.
     """
 
     model_config = ConfigDict(extra="allow")

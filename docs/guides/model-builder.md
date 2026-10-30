@@ -114,9 +114,11 @@ string or a list of them; requirements and project file paths are not
 supported, and direct references must use absolute URLs.
 
 If your model already lives in a pre-built environment (for example, a conda
-environment for its training framework), set the model's `python` to that
-environment's interpreter instead of `env`. Install `nomad-scifm` and your
-package into that environment so the model subprocess can import both.
+environment for its training framework), you can set the model's `python` to
+that environment's interpreter instead of `env` while you develop. Install
+`nomad-scifm` and your package into that environment so the model subprocess
+can import both. A server configured this way is not deployable by itself;
+switch to `env` (or a container image) before you deploy.
 
 For demo deployments without an explicit model `env`, the host environment is
 defined by

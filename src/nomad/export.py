@@ -298,7 +298,8 @@ def _pin_existing_interpreters(
             raw_entry["python"] = str(environment.python)
         LOGGER.warning(
             "Model '%s' uses external interpreter %s; the export bundle is not "
-            "self-contained for this model",
+            "self-contained or deployable for this model (python: is "
+            "development-only; use env for deployment)",
             model.tool_name or model.name_or_path,
             raw_entry["python"],
         )

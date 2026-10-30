@@ -47,10 +47,11 @@ requirements. `requirements.txt` and `pyproject.toml` paths are not supported.
 Direct references must use absolute URLs, such as
 `my-package @ file:///opt/packages/my-package`.
 
-Alternatively, set `python` to an existing interpreter, such as a virtual
-environment's `bin/python` or a conda environment's `bin/python`, when a model
-needs a Python environment that Nomad should not build (for example, a training
-framework installed in its own environment). Relative paths resolve against the
+Alternatively, during development, set `python` to an existing interpreter,
+such as a virtual environment's `bin/python` or a conda environment's
+`bin/python`. This serves a model from an environment you already maintain (for
+example, a training framework's environment) without packaging it first.
+Relative paths resolve against the
 config file's directory, and `${VAR}` placeholders are expanded. The interpreter
 must be able to import `nomad` and the model's `model_class`. `env` and `python`
 are mutually exclusive.
@@ -62,6 +63,14 @@ fmod_models:
     python: ${MODEL_ENV}/bin/python
     tool_name: my-model
 ```
+
+:::{warning}
+`python` is for development only. Nomad does not build, pin, or bundle an
+interpreter set this way, so a server that relies on it is not deployable on
+its own: every host that runs it must already provide a matching environment
+at that path. Before you deploy, replace `python` with `env` requirements, or
+ship the model's environment in a container image.
+:::
 
 Models run in per-device Python subprocesses. When `env` is omitted, the
 subprocess uses the same virtual environment and Python executable as the Nomad
@@ -87,7 +96,8 @@ relocatable and must run with a Python runtime compatible with the one used for
 the export. Pass `--no-venv` to omit them from an export.
 
 A model's `python` interpreter is never copied into the bundle, and `nomad
-export` warns that the bundle is not self-contained for that model. Values that
+export` warns that the bundle is not self-contained for that model. Such a
+bundle is not a deployable artifact; see the warning above. Values that
 use `${VAR}` or `${VAR:DEFAULT}` placeholders are written to the exported config
 unexpanded, so each deployment resolves the interpreter from its own
 environment; set the variable when serving the bundle. Other values are
