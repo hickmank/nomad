@@ -201,6 +201,42 @@ def test_tool_manager_config_defaults_venv_idle_seconds():
     assert config.rpc_timeout_seconds == 30.0
 
 
+def test_tool_manager_config_defaults_to_building_environments():
+    assert ToolManagerConfig().build_envs is True
+
+
+@pytest.mark.parametrize("build_envs", [True, False])
+def test_server_config_passes_build_envs_to_model_environment(
+    monkeypatch, tmp_path: Path, build_envs: bool
+):
+    captured = {}
+
+    def fake_inspect_remote_model(*, environment, **kwargs):
+        captured["environment"] = environment
+        return types.SimpleNamespace(name="demo")
+
+    monkeypatch.setattr("nomad.config.inspect_remote_model", fake_inspect_remote_model)
+    monkeypatch.setattr("nomad.config.replace", lambda remote, **kwargs: remote)
+    model_dir = tmp_path / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    config = ServerConfig.model_validate(
+        {
+            "tool_manager": {"build_envs": build_envs},
+            "fmod_models": [
+                {
+                    "model_class": "demo.Tool",
+                    "name_or_path": str(model_dir),
+                    "env": "demo-package==1",
+                }
+            ],
+        }
+    )
+
+    config.build_remote(config.fmod_models[0])
+
+    assert captured["environment"].allow_build is build_envs
+
+
 def test_tool_manager_config_rejects_removed_enabled_flag():
     with pytest.raises(ValidationError) as exc_info:
         ToolManagerConfig.model_validate({"enabled": False})

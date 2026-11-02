@@ -29,6 +29,11 @@ class ModelEnvironment:
 
     requirements: tuple[str, ...]
     base_dir: Path = field(default_factory=Path.cwd)
+    # Whether ``ensure`` may build a missing environment. Offline deployments set
+    # this to False so a missing prebuilt venv fails fast instead of trying to
+    # download packages. It is a runtime policy, not part of the environment's
+    # identity, so it is excluded from equality and from the checksum.
+    allow_build: bool = field(default=True, compare=False)
 
     @property
     def contents(self) -> bytes:
@@ -63,9 +68,13 @@ class ModelEnvironment:
         return _venv_python(self.cache_dir)
 
     def ensure(self, *, cache_root: Path | None = None) -> Path:
-        """Create the cached environment if necessary and return its Python."""
+        """Create the cached environment if necessary and return its Python.
+
+        Raises:
+            RuntimeError: If the environment is missing and ``allow_build`` is
+                False.
+        """
         root = (cache_root or get_cache_root()) / "venv"
-        root.mkdir(parents=True, exist_ok=True)
         nomad_requirement, nomad_project = _nomad_requirement()
         checksum = self._checksum(
             nomad_requirement=nomad_requirement,
@@ -77,6 +86,17 @@ class ModelEnvironment:
             logger.debug("Reusing model environment %s", target)
             return python
 
+        # Check before touching the cache so an offline server never creates
+        # directories or lock files for an environment it may not build.
+        if not self.allow_build:
+            raise RuntimeError(
+                "Model environment is not prebuilt and building is disabled "
+                f"(tool_manager.build_envs is false). Expected {target}. Run "
+                "`nomad export` with the same Python and Nomad installation that "
+                "serves the bundle, and set NOMAD_CACHE to the export directory."
+            )
+
+        root.mkdir(parents=True, exist_ok=True)
         lock = FileLock(str(root / f".{checksum}.lock"))
         with lock:
             if python := _completed_environment(target, expected_marker):
@@ -208,8 +228,13 @@ def resolve_model_environment(
     *,
     base_dir: Path | None = None,
     python: str | Path | None = None,
+    allow_build: bool = True,
 ) -> PythonEnvironment:
-    """Normalize a model's PEP 508 requirements or interpreter for subprocesses."""
+    """Normalize a model's PEP 508 requirements or interpreter for subprocesses.
+
+    ``allow_build`` only applies to ``env`` requirements; host and existing
+    interpreters are never built by Nomad.
+    """
     if python is not None:
         if value is not None:
             raise ValueError("A model environment cannot set both env and python")
@@ -238,6 +263,7 @@ def resolve_model_environment(
     return ModelEnvironment(
         requirements=requirements,
         base_dir=resolved_base,
+        allow_build=allow_build,
     )
 
 

@@ -177,10 +177,15 @@ class TorchModuleConfig(BaseModel):
         """Resolve ``name_or_path`` to a loadable local path."""
         return self.resolve_spec(base_dir=base_dir).pull()
 
-    def resolve_environment(self, *, base_dir: Path | None = None) -> PythonEnvironment:
-        """Normalize ``env`` or ``python`` for an isolated model subprocess."""
+    def resolve_environment(
+        self, *, base_dir: Path | None = None, build_envs: bool = True
+    ) -> PythonEnvironment:
+        """Normalize ``env`` or ``python`` for an isolated model subprocess.
+
+        ``build_envs`` controls whether a missing ``env`` environment may be built.
+        """
         return resolve_model_environment(
-            self.env, base_dir=base_dir, python=self.python
+            self.env, base_dir=base_dir, python=self.python, allow_build=build_envs
         )
 
     def build_remote(
@@ -188,9 +193,10 @@ class TorchModuleConfig(BaseModel):
         *,
         base_dir: Path | None = None,
         rpc_timeout_seconds: float | None = 30.0,
+        build_envs: bool = True,
     ) -> RemoteModel:
         """Inspect this model inside its configured subprocess environment."""
-        environment = self.resolve_environment(base_dir=base_dir)
+        environment = self.resolve_environment(base_dir=base_dir, build_envs=build_envs)
         spec = self.resolve_spec(base_dir=base_dir)
         remote = inspect_remote_model(
             environment=environment,
@@ -340,6 +346,9 @@ class ToolManagerConfig(BaseModel):
     rpc_timeout_seconds: float | None = Field(default=30.0, gt=0)
     """Maximum seconds for a model subprocess RPC. ``None`` disables the deadline."""
 
+    build_envs: bool = True
+    """Build missing ``env`` model environments on demand. ``nomad export`` sets this to ``False`` so an exported server never downloads packages at run time."""
+
     model_config = ConfigDict(extra="forbid")
 
     def instantiate(self, *, device_provider=None, **overrides):
@@ -455,6 +464,7 @@ class ServerConfig(BaseModel):
         return fmod.build_remote(
             base_dir=self.context_dir,
             rpc_timeout_seconds=self.tool_manager.rpc_timeout_seconds,
+            build_envs=self.tool_manager.build_envs,
         )
 
     @classmethod

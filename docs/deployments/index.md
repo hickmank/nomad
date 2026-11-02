@@ -5,5 +5,6 @@
 
 deployment-spec
 guide
+offline-images
 agent-skills
 ```

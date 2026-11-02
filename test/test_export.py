@@ -65,6 +65,8 @@ def test_export_models_config_builds_pep508_environments(
         tmp_path / "bundle",
         tmp_path / "bundle",
     ]
+    # Venvs ship in the bundle, so the exported server must not build at run time.
+    assert exported["tool_manager"]["build_envs"] is False
 
 
 def test_export_models_config_can_skip_venvs(monkeypatch, tmp_path: Path):
@@ -91,11 +93,52 @@ def test_export_models_config_can_skip_venvs(monkeypatch, tmp_path: Path):
         lambda *args, **kwargs: pytest.fail("venv construction was not disabled"),
     )
 
-    export_models_config(
+    output_path = export_models_config(
         config_path,
         tmp_path / "bundle",
         build_venvs=False,
     )
+    exported = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    # Without bundled venvs the server must still be allowed to build them.
+    assert exported["tool_manager"].get("build_envs", True) is True
+
+
+def test_export_builds_venvs_even_when_source_disables_building(
+    monkeypatch, tmp_path: Path
+):
+    built = []
+
+    def fake_ensure(self, *, cache_root=None):
+        assert self.allow_build is True
+        built.append(self.requirements)
+        return cache_root / "venv" / "python"
+
+    monkeypatch.setattr("nomad.export.ModelEnvironment.ensure", fake_ensure)
+    project_dir = tmp_path / "config"
+    model_dir = project_dir / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.bin").write_text("weights", encoding="utf-8")
+    config_path = project_dir / "nomad.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "tool_manager:",
+                "  build_envs: false",
+                "fmod_models:",
+                "  - model_class: demo_package.Tool",
+                "    name_or_path: models/demo",
+                "    env: demo-package==1.2",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output_path = export_models_config(config_path, tmp_path / "bundle")
+
+    exported = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert built == [("demo-package==1.2",)]
+    assert exported["tool_manager"]["build_envs"] is False
 
 
 def test_export_models_config_keeps_python_placeholders(

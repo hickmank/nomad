@@ -338,6 +338,9 @@ def export_models_config(
             base_dir=config.context_dir,
             cache_root=output_dir,
         )
+        # The bundle now carries every env: environment, so the exported server
+        # must never build one at run time (which would need network access).
+        exported_data.setdefault("tool_manager", {})["build_envs"] = False
     entry_exports, source_exports = _collect_model_exports(
         raw_models,
         base_dir=config.context_dir,

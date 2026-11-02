@@ -155,6 +155,69 @@ def test_environment_can_be_built_into_export_cache(monkeypatch, tmp_path: Path)
     assert python == cache_root / "venv" / environment.checksum / "bin" / "python"
 
 
+def test_environment_without_build_permission_fails_when_missing(
+    monkeypatch, tmp_path: Path
+):
+    environment = model_env.resolve_model_environment(
+        ["demo-package==1"],
+        base_dir=tmp_path,
+        allow_build=False,
+    )
+    monkeypatch.setattr(
+        model_env.ModelEnvironment,
+        "_create",
+        lambda *args, **kwargs: pytest.fail("environment build was not disabled"),
+    )
+    cache_root = tmp_path / "export"
+
+    with pytest.raises(RuntimeError, match="build_envs is false") as exc_info:
+        environment.ensure(cache_root=cache_root)
+
+    assert str(cache_root / "venv" / environment.checksum) in str(exc_info.value)
+    # The guard runs before any cache directories or lock files are created.
+    assert not cache_root.exists()
+
+
+def test_environment_without_build_permission_reuses_prebuilt(
+    monkeypatch, tmp_path: Path
+):
+    def fake_create(
+        self: model_env.ModelEnvironment,
+        target: Path,
+        **kwargs,
+    ) -> None:
+        (target / "bin").mkdir(parents=True)
+        (target / "bin" / "python").touch()
+
+    monkeypatch.setattr(model_env.ModelEnvironment, "_create", fake_create)
+    cache_root = tmp_path / "export"
+    builder = model_env.resolve_model_environment(
+        ["demo-package==1"], base_dir=tmp_path
+    )
+    expected = builder.ensure(cache_root=cache_root)
+    offline = model_env.resolve_model_environment(
+        ["demo-package==1"],
+        base_dir=tmp_path,
+        allow_build=False,
+    )
+
+    assert offline.ensure(cache_root=cache_root) == expected
+
+
+def test_build_permission_does_not_change_environment_identity(tmp_path: Path):
+    building = model_env.resolve_model_environment(
+        ["demo-package==1"], base_dir=tmp_path
+    )
+    offline = model_env.resolve_model_environment(
+        ["demo-package==1"],
+        base_dir=tmp_path,
+        allow_build=False,
+    )
+
+    assert offline.checksum == building.checksum
+    assert offline == building
+
+
 def test_environment_cache_is_reused(monkeypatch, tmp_path: Path):
     commands: list[list[str]] = []
     installed_requirements: list[str] = []

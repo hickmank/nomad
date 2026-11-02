@@ -21,6 +21,7 @@ tool_manager:
   disk_idle_seconds: 600
   venv_idle_seconds: 1200
   rpc_timeout_seconds: 30
+  build_envs: true
   max_pending_per_tool: 50000
 search_tool:
   expose: true
@@ -84,16 +85,22 @@ subprocess when switching between models with the same environment;
 `tool_manager.venv_idle_seconds` controls when an idle subprocess is terminated
 and defaults to 1200 seconds. `tool_manager.rpc_timeout_seconds` limits each
 subprocess request to 30 seconds by default; set it to `null` to disable the
-deadline. The tool manager is always enabled and controls batching, device
-assignment, and model subprocess lifecycles.
+deadline. `tool_manager.build_envs` (default `true`) lets Nomad build a missing
+`env` environment on demand; when it is `false`, a model whose environment is
+not already built fails to load instead of downloading packages. The tool
+manager is always enabled and controls batching, device assignment, and model
+subprocess lifecycles.
 
 `nomad export` leaves requirement strings and lists unchanged and builds their
 explicit environments under `<output>/venv` by default, without loading the
 models. Set `NOMAD_CACHE=<output>` when serving the exported config so those
-environments are reused. Build the bundle at its final absolute deployment path
-(for example, `nomad export nomad.yml /opt/nomad`): virtual environments are not
-relocatable and must run with a Python runtime compatible with the one used for
-the export. Pass `--no-venv` to omit them from an export.
+environments are reused, and sets `tool_manager.build_envs: false` in the
+exported config so the server never builds environments at run time. Virtual
+environments are not relocatable: they only work with the Python, operating
+system, and path they were built with. To deploy an `env` model, run `nomad
+export` inside your container image build; see
+{doc}`Offline Container Images </deployments/offline-images>`. Pass `--no-venv`
+to omit environments from an export, which leaves `build_envs` unchanged.
 
 A model's `python` interpreter is never copied into the bundle, and `nomad
 export` warns that the bundle is not self-contained for that model. Such a
