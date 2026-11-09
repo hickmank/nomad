@@ -9,6 +9,8 @@ import traceback
 from collections.abc import Mapping
 from typing import Any, TextIO
 
+import torch
+
 from nomad import accelerator
 from nomad._torch_module_compat import is_torch_module_tool_instance
 from nomad.jsonrpc import Dispatcher, Handler, encode_line, encode_response
@@ -53,12 +55,7 @@ class ModelWorker:
         if params.get("batch_size") is not None:
             tool.batch_size = max(1, int(params["batch_size"]))
         tool.fm = tool.fm.to(str(params.get("device", "cpu")))
-        try:
-            import torch
-
-            tool.device = torch.device(str(params.get("device", "cpu")))
-        except ImportError:  # pragma: no cover - TorchModuleTool already needs torch
-            pass
+        tool.device = torch.device(str(params.get("device", "cpu")))
         self.tool = tool
         return {
             "name": tool.name or model_class.__name__,
@@ -89,12 +86,7 @@ class ModelWorker:
     def offload(self) -> None:
         tool = self._require_tool()
         tool.fm = tool.fm.to("cpu")
-        try:
-            import torch
-
-            tool.device = torch.device("cpu")
-        except ImportError:  # pragma: no cover
-            pass
+        tool.device = torch.device("cpu")
 
     @staticmethod
     def clear_cache() -> None:
@@ -102,8 +94,6 @@ class ModelWorker:
 
     @staticmethod
     def device_memory(params: Mapping[str, Any]) -> dict[str, int]:
-        import torch
-
         return accelerator.device_memory(torch.device(str(params["device"])))
 
     def _discard_tool(self) -> None:
