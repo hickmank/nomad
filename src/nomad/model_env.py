@@ -89,6 +89,10 @@ class ModelEnvironment:
         digest.update(nomad_requirement.encode())
         digest.update(b"\0nomad-project\0")
         digest.update(nomad_project)
+        # Environments are built from the host interpreter (``sys.executable``),
+        # and their compiled wheels and bytecode only work with that Python's
+        # version, implementation, and platform. Keying on these keeps a shared
+        # or exported cache from handing a 3.12 venv to a 3.13 host.
         digest.update(b"\0python-runtime\0")
         digest.update(_python_runtime_identity())
         # Local ``file:`` packages are identified by their contents, not just
