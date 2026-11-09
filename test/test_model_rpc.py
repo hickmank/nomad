@@ -43,7 +43,9 @@ def test_model_process_json_rpc_round_trip(monkeypatch, tmp_path: Path):
     module.write_text(
         """
 import os
+import torch
 from pydantic import BaseModel
+from nomad.fm_base_tool import TorchModuleTool
 
 class Input(BaseModel):
     value: int
@@ -51,28 +53,26 @@ class Input(BaseModel):
 class Output(BaseModel):
     value: int
 
-class Module:
-    def to(self, device):
-        self.device = device
-        return self
-
-class Tool:
-    name = "isolated"
-    description = "isolated fixture"
-    args_schema = Input
-    output_schema = Output
-    batch_size = 2
-
-    def __init__(self):
-        self.fm = Module()
+class Tool(TorchModuleTool):
+    name: str | None = "isolated"
+    description: str = "isolated fixture"
+    args_schema: type[Input] = Input
+    output_schema: type[Output] = Output
+    batch_size: int = 2
 
     @classmethod
     def from_pretrained(cls, source):
         print("model stdout is not protocol output")
         os.write(1, b"native model stdout is not protocol output\\n")
-        return cls()
+        return cls(fm=torch.nn.Identity())
 
-    def batch_as_completed(self, inputs, max_concurency=None):
+    def preprocess(self, inputs):
+        return inputs
+
+    def _forward(self, inputs):
+        return inputs
+
+    def postprocess(self, inputs):
         for item in inputs:
             yield Output(value=item.value + 1)
 """,
@@ -363,7 +363,9 @@ def test_close_terminates_worker_blocked_in_rpc(monkeypatch, tmp_path: Path):
     module.write_text(
         """
 import time
+import torch
 from pydantic import BaseModel
+from nomad.fm_base_tool import TorchModuleTool
 
 class Input(BaseModel):
     value: int
@@ -371,26 +373,24 @@ class Input(BaseModel):
 class Output(BaseModel):
     value: int
 
-class Module:
-    def to(self, device):
-        return self
-
-class Tool:
-    name = "blocking"
-    description = "blocking fixture"
-    args_schema = Input
-    output_schema = Output
-    batch_size = 1
-
-    def __init__(self):
-        self.fm = Module()
+class Tool(TorchModuleTool):
+    name: str | None = "blocking"
+    description: str = "blocking fixture"
+    args_schema: type[Input] = Input
+    output_schema: type[Output] = Output
 
     @classmethod
     def from_pretrained(cls, source):
-        return cls()
+        return cls(fm=torch.nn.Identity())
 
-    def batch_as_completed(self, inputs, max_concurency=None):
+    def preprocess(self, inputs):
+        return inputs
+
+    def _forward(self, inputs):
         time.sleep(60)
+        return inputs
+
+    def postprocess(self, inputs):
         return []
 """,
         encoding="utf-8",
@@ -451,7 +451,9 @@ def test_close_terminates_model_spawned_child(
 import subprocess
 import sys
 from pathlib import Path
+import torch
 from pydantic import BaseModel
+from nomad.fm_base_tool import TorchModuleTool
 
 class Input(BaseModel):
     value: int
@@ -459,27 +461,25 @@ class Input(BaseModel):
 class Output(BaseModel):
     value: int
 
-class Module:
-    def to(self, device):
-        return self
-
-class Tool:
-    name = "child"
-    description = "child fixture"
-    args_schema = Input
-    output_schema = Output
-    batch_size = 1
-
-    def __init__(self):
-        self.fm = Module()
+class Tool(TorchModuleTool):
+    name: str | None = "child"
+    description: str = "child fixture"
+    args_schema: type[Input] = Input
+    output_schema: type[Output] = Output
 
     @classmethod
     def from_pretrained(cls, source):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         Path(source).write_text(str(child.pid))
-        return cls()
+        return cls(fm=torch.nn.Identity())
 
-    def batch_as_completed(self, inputs, max_concurency=None):
+    def preprocess(self, inputs):
+        return inputs
+
+    def _forward(self, inputs):
+        return inputs
+
+    def postprocess(self, inputs):
         return []
 """,
         encoding="utf-8",
@@ -537,7 +537,9 @@ import io
 import json
 import os
 import sys
+import torch
 from pydantic import BaseModel
+from nomad.fm_base_tool import TorchModuleTool
 
 class Input(BaseModel):
     value: int
@@ -547,25 +549,23 @@ class Output(BaseModel):
     virtual_env: str | None
     pythonpath: str | None
 
-class Module:
-    def to(self, device):
-        return self
-
-class Tool:
-    name = "existing"
-    description = "existing interpreter fixture"
-    args_schema = Input
-    output_schema = Output
-    batch_size = 1
-
-    def __init__(self):
-        self.fm = Module()
+class Tool(TorchModuleTool):
+    name: str | None = "existing"
+    description: str = "existing interpreter fixture"
+    args_schema: type[Input] = Input
+    output_schema: type[Output] = Output
 
     @classmethod
     def from_pretrained(cls, source):
-        return cls()
+        return cls(fm=torch.nn.Identity())
 
-    def batch_as_completed(self, inputs, max_concurency=None):
+    def preprocess(self, inputs):
+        return inputs
+
+    def _forward(self, inputs):
+        return inputs
+
+    def postprocess(self, inputs):
         for _ in inputs:
             yield Output(
                 cwd=os.getcwd(),

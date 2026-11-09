@@ -9,6 +9,7 @@ import traceback
 from collections.abc import Mapping
 from typing import Any, TextIO
 
+from nomad._torch_module_compat import is_torch_module_tool_instance
 from nomad.jsonrpc import Dispatcher, Handler, encode_line, encode_response
 
 
@@ -44,8 +45,7 @@ class ModelWorker:
                 f"{params['model_class']} does not expose a 'from_pretrained' constructor"
             )
         tool = model_class.from_pretrained(str(params["source"]))
-        required = ("fm", "args_schema", "output_schema", "batch_as_completed")
-        if any(not hasattr(tool, attribute) for attribute in required):
+        if not is_torch_module_tool_instance(tool):
             raise TypeError("Instantiated object is not a TorchModuleTool")
         if params.get("tool_name"):
             tool.name = str(params["tool_name"])
