@@ -115,7 +115,8 @@ class TorchModuleConfig(BaseModel):
 
     Relative paths resolve against the configuration file's directory. The
     interpreter must be able to import ``nomad`` and ``model_class``. Intended
-    for development only: a server that relies on it is not deployable by itself.
+    for development only: a server that relies on it is not deployable by itself,
+    and ``nomad export`` rejects it.
     """
 
     model_config = ConfigDict(extra="allow")

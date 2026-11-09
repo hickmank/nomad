@@ -141,9 +141,7 @@ def test_export_builds_venvs_even_when_source_disables_building(
     assert exported["tool_manager"]["build_envs"] is False
 
 
-def test_export_models_config_keeps_python_placeholders(
-    monkeypatch, tmp_path: Path, caplog
-):
+def test_export_models_config_rejects_python_models(tmp_path: Path):
     config_dir = tmp_path / "config"
     model_dir = config_dir / "models" / "demo"
     model_dir.mkdir(parents=True)
@@ -155,35 +153,23 @@ def test_export_models_config_keeps_python_placeholders(
                 "fmod_models:",
                 "  - model_class: demo.Tool",
                 "    name_or_path: models/demo",
-                "    tool_name: placeholder-model",
-                "    python: ${MODEL_ENV}/bin/python",
-                "  - model_class: demo.Tool",
-                "    name_or_path: models/demo",
-                "    tool_name: relative-model",
+                "    tool_name: dev-model",
                 "    python: envs/demo/bin/python",
                 "  - model_class: demo.Tool",
                 "    name_or_path: models/demo",
-                "    tool_name: default-model",
-                "    python: ${OTHER_ENV:/opt/envs/other}/bin/python",
+                "    tool_name: host-model",
                 "",
             ]
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("MODEL_ENV", "/export-host/envs/yoke")
-    monkeypatch.delenv("OTHER_ENV", raising=False)
+    output_dir = tmp_path / "bundle"
 
-    with caplog.at_level("WARNING", logger="nomad"):
-        output_path = export_models_config(config_path, tmp_path / "bundle")
+    with pytest.raises(ValueError, match=r"python: \(dev-model\); use env"):
+        export_models_config(config_path, output_dir)
 
-    exported = yaml.safe_load(output_path.read_text(encoding="utf-8"))
-    assert [entry["python"] for entry in exported["fmod_models"]] == [
-        "${MODEL_ENV}/bin/python",
-        str(config_dir.resolve() / "envs" / "demo" / "bin" / "python"),
-        "${OTHER_ENV:/opt/envs/other}/bin/python",
-    ]
-    assert "/export-host" not in output_path.read_text(encoding="utf-8")
-    assert "${MODEL_ENV}/bin/python; the export bundle is not" in caplog.text
+    # The check runs before anything is written.
+    assert not output_dir.exists()
 
 
 def test_export_models_config_https_rewrites_git_sources_and_normalizes_hf(

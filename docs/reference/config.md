@@ -70,8 +70,8 @@ export` inside your container image build; see
 {doc}`Offline Container Images </deployments/offline-images>`. Pass `--no-venv`
 to omit environments from an export, which leaves `build_envs` unchanged.
 
-`nomad export` does not support `python` models; it warns that the bundle is
-not self-contained for them.
+`nomad export` does not support `python` models and fails if the config
+contains any.
 
 | Name | Example |
 | --- | --- |
