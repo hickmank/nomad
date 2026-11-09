@@ -26,6 +26,9 @@ def _resolve_symbol(dotted_path: str) -> Any:
 class ModelWorker:
     def __init__(self) -> None:
         self.tool: Any = None
+        # Identifies which model ``self.tool`` was loaded from, so ``run_batch``
+        # can tell whether the requested model is already resident.
+        self._loaded_key: tuple[str, str, str | None] | None = None
         self.should_stop = False
 
     def handlers(self) -> dict[str, Handler]:
@@ -57,6 +60,7 @@ class ModelWorker:
         tool.fm = tool.fm.to(str(params.get("device", "cpu")))
         tool.device = torch.device(str(params.get("device", "cpu")))
         self.tool = tool
+        self._loaded_key = _model_key(params)
         return {
             "name": tool.name or model_class.__name__,
             "description": tool.description,
@@ -66,7 +70,10 @@ class ModelWorker:
         }
 
     def run_batch(self, params: Mapping[str, Any]) -> list[Any]:
-        tool = self._require_tool()
+        # The request carries the model's load parameters, so a worker whose
+        # model was unloaded or offloaded can always serve it; there is no
+        # state in which run_batch fails for lack of a loaded model.
+        tool = self._ensure_tool(params["model"])
         inputs = [tool.args_schema.model_validate(item) for item in params["inputs"]]
         outputs = tool.batch_as_completed(
             inputs,
@@ -78,15 +85,17 @@ class ModelWorker:
         ]
 
     def set_batch_size(self, params: Mapping[str, Any]) -> None:
-        self._require_tool().batch_size = max(1, int(params["batch_size"]))
+        # With no model loaded there is nothing to resize; run_batch passes its
+        # batch size on every call anyway.
+        if self.tool is not None:
+            self.tool.batch_size = max(1, int(params["batch_size"]))
 
     def shutdown(self, _params: Mapping[str, Any]) -> None:
         self.should_stop = True
 
     def offload(self) -> None:
-        tool = self._require_tool()
-        tool.fm = tool.fm.to("cpu")
-        tool.device = torch.device("cpu")
+        if self.tool is not None:
+            self._move_tool(torch.device("cpu"))
 
     @staticmethod
     def clear_cache() -> None:
@@ -101,12 +110,39 @@ class ModelWorker:
             return
         self.offload()
         self.tool = None
+        self._loaded_key = None
         gc.collect()
 
-    def _require_tool(self) -> Any:
-        if self.tool is None:
-            raise RuntimeError("No model is loaded")
+    def _ensure_tool(self, model_params: Mapping[str, Any]) -> Any:
+        """Return the requested model, loading or moving it onto its device.
+
+        Args:
+            model_params: The same mapping ``load`` accepts.
+
+        Returns:
+            The loaded tool, placed on ``model_params["device"]``.
+        """
+        if self.tool is None or self._loaded_key != _model_key(model_params):
+            self.load(model_params)
+        device = torch.device(str(model_params.get("device", "cpu")))
+        if self.tool.device != device:
+            # The model was offloaded (or loaded elsewhere); move it back.
+            self._move_tool(device)
         return self.tool
+
+    def _move_tool(self, device: torch.device) -> None:
+        self.tool.fm = self.tool.fm.to(device)
+        self.tool.device = device
+
+
+def _model_key(params: Mapping[str, Any]) -> tuple[str, str, str | None]:
+    """Return the fields that identify which model ``params`` loads."""
+    tool_name = params.get("tool_name")
+    return (
+        str(params["model_class"]),
+        str(params["source"]),
+        str(tool_name) if tool_name else None,
+    )
 
 
 def _print_exception(exc: Exception) -> None:

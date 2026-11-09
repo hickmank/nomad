@@ -1047,6 +1047,7 @@ class TorchModelToolManager:
                         self._tools[tool_name],
                         requests,
                         batch_size,
+                        slot.device,
                     )
                 except Exception as exc:
                     nomad_metrics.record_tool_batch(
@@ -1160,6 +1161,7 @@ class TorchModelToolManager:
         state: ToolState,
         requests: list[ToolRequest],
         batch_size: int,
+        device: torch.device,
     ) -> list[BaseModel | dict[str, Any] | Any]:
         inputs = [request.input for request in requests]
         if isinstance(tool, ModelProcess):
@@ -1169,7 +1171,13 @@ class TorchModelToolManager:
                 else dict(item)
                 for item in inputs
             ]
-            outputs = tool.run_batch(serialized_inputs, batch_size=batch_size)
+            assert state.remote is not None
+            outputs = tool.run_batch(
+                state.remote,
+                str(device),
+                serialized_inputs,
+                batch_size=batch_size,
+            )
         else:
             outputs = list(
                 tool.batch_as_completed(

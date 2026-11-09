@@ -16,7 +16,7 @@ from fastmcp import FastMCP
 from pydantic import BaseModel, ValidationError
 
 from nomad.config import ToolManagerConfig
-from nomad.jsonrpc import METHOD_NOT_FOUND, SERVER_ERROR
+from nomad.jsonrpc import METHOD_NOT_FOUND
 from nomad.model_env import ModelEnvironment
 from nomad.model_rpc import (
     ModelProcess,
@@ -96,7 +96,9 @@ class Tool(TorchModuleTool):
     assert remote.args_schema["properties"]["value"]["type"] == "integer"
     with ModelProcess(environment) as process:  # type: ignore[arg-type]
         process.load(remote, "cpu")
-        assert process.run_batch([{"value": 2}], batch_size=1) == [{"value": 3}]
+        assert process.run_batch(remote, "cpu", [{"value": 2}], batch_size=1) == [
+            {"value": 3}
+        ]
 
 
 def test_model_worker_validates_outputs_against_declared_schema():
@@ -109,16 +111,98 @@ def test_model_worker_validates_outputs_against_declared_schema():
     class InvalidOutputTool:
         args_schema = Input
         output_schema = Output
+        device = torch.device("cpu")
 
         @staticmethod
         def batch_as_completed(inputs, max_concurency=None):
             return [{"unexpected": item.value} for item in inputs]
 
+    model = {"model_class": "fixture.Tool", "source": "weights", "device": "cpu"}
     worker = ModelWorker()
+    # Pretend the tool was loaded from ``model`` so run_batch does not reload it.
     worker.tool = InvalidOutputTool()
+    worker._loaded_key = ("fixture.Tool", "weights", None)
 
     with pytest.raises(ValidationError, match="value"):
-        worker.run_batch({"inputs": [{"value": 2}], "batch_size": 1})
+        worker.run_batch({"model": model, "inputs": [{"value": 2}], "batch_size": 1})
+
+
+def test_model_worker_run_batch_reloads_after_unload_and_offload(
+    monkeypatch, tmp_path: Path
+):
+    module = tmp_path / "reload_fixture.py"
+    module.write_text(
+        """
+from typing import ClassVar
+import torch
+from pydantic import BaseModel
+from nomad.fm_base_tool import TorchModuleTool
+
+class Input(BaseModel):
+    value: int
+
+class Output(BaseModel):
+    value: int
+
+class Tool(TorchModuleTool):
+    description: str = "reload fixture"
+    args_schema: type[Input] = Input
+    output_schema: type[Output] = Output
+    loads: ClassVar[int] = 0
+
+    @classmethod
+    def from_pretrained(cls, source):
+        cls.loads += 1
+        return cls(fm=torch.nn.Identity(), device=torch.device("cpu"))
+
+    def preprocess(self, inputs):
+        return inputs
+
+    def _forward(self, inputs):
+        return inputs
+
+    def postprocess(self, inputs):
+        for item in inputs:
+            yield Output(value=item.value + 1)
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from reload_fixture import Tool  # type: ignore[import-not-found]
+
+    # "meta" stands in for an accelerator so the offload/restore move is visible
+    # on CPU-only hosts.
+    model = {
+        "model_class": "reload_fixture.Tool",
+        "source": "weights",
+        "tool_name": "reload",
+        "batch_size": 1,
+        "device": "meta",
+    }
+    request = {"model": model, "inputs": [{"value": 1}], "batch_size": 1}
+    worker = ModelWorker()
+
+    # run_batch with nothing loaded loads the model itself.
+    assert worker.run_batch(request) == [{"value": 2}]
+    assert Tool.loads == 1
+
+    # After offload the same model is moved back, not reloaded.
+    worker.offload()
+    assert worker.tool.device == torch.device("cpu")
+    assert worker.run_batch(request) == [{"value": 2}]
+    assert worker.tool.device == torch.device("meta")
+    assert Tool.loads == 1
+
+    # After unload the model is reloaded on demand.
+    worker._discard_tool()
+    assert worker.tool is None
+    assert worker.run_batch(request) == [{"value": 2}]
+    assert Tool.loads == 2
+
+    # A different model replaces the loaded one.
+    other = {**request, "model": {**model, "source": "other-weights"}}
+    assert worker.run_batch(other) == [{"value": 2}]
+    assert Tool.loads == 3
 
 
 def test_model_worker_main_speaks_json_rpc_until_shutdown():
@@ -136,10 +220,8 @@ def test_model_worker_main_speaks_json_rpc_until_shutdown():
     responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert [response["id"] for response in responses] == [1, 2, 3]
     assert responses[0]["error"]["code"] == METHOD_NOT_FOUND
-    assert responses[1]["error"] == {
-        "code": SERVER_ERROR,
-        "message": "No model is loaded",
-    }
+    # Offloading an empty worker is a no-op rather than an error.
+    assert responses[1] == {"jsonrpc": "2.0", "id": 2, "result": None}
     assert responses[2] == {"jsonrpc": "2.0", "id": 3, "result": None}
 
 
@@ -163,7 +245,7 @@ async def test_slot_reuses_worker_for_same_environment_and_replaces_for_new_one(
             self.remote = remote
             return {}
 
-        def run_batch(self, inputs, *, batch_size):
+        def run_batch(self, remote, device, inputs, *, batch_size):
             return [{"value": item["value"] + 1} for item in inputs]
 
         def request(self, method, params=None):
@@ -413,7 +495,7 @@ class Tool(TorchModuleTool):
 
     def run_blocking_request() -> None:
         try:
-            process.run_batch([{"value": 1}], batch_size=1)
+            process.run_batch(remote, "cpu", [{"value": 1}], batch_size=1)
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 
@@ -436,7 +518,7 @@ class Tool(TorchModuleTool):
         timed_process.load(remote, "cpu")
         timed_process.timeout_seconds = 0.1
         with pytest.raises(ModelRPCError, match="timed out after 0.1 seconds"):
-            timed_process.run_batch([{"value": 1}], batch_size=1)
+            timed_process.run_batch(remote, "cpu", [{"value": 1}], batch_size=1)
         assert not timed_process.alive
 
 
@@ -592,7 +674,7 @@ class Tool(TorchModuleTool):
     )
     with ModelProcess(environment) as process:
         process.load(remote, "cpu")
-        [output] = process.run_batch([{"value": 1}], batch_size=1)
+        [output] = process.run_batch(remote, "cpu", [{"value": 1}], batch_size=1)
 
     assert Path(output["cwd"]).resolve() == tmp_path.resolve()
     assert output["pythonpath"] is None

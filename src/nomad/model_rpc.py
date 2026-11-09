@@ -213,13 +213,21 @@ class ModelProcess:
 
     def run_batch(
         self,
+        remote: RemoteModel,
+        device: str,
         inputs: list[dict[str, Any]],
         *,
         batch_size: int,
     ) -> list[Any]:
+        # Sending the load parameters lets the worker (re)load the model itself
+        # if it was unloaded or offloaded since the last request.
         result = self.request(
             "run_batch",
-            {"inputs": inputs, "batch_size": batch_size},
+            {
+                "model": remote.load_params(device),
+                "inputs": inputs,
+                "batch_size": batch_size,
+            },
         )
         if not isinstance(result, list):
             raise ModelRPCError("Model worker returned a non-list batch result")
