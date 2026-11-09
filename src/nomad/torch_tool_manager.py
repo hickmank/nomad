@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import gc
 import logging
 import threading
 import time
@@ -18,6 +17,7 @@ from pydantic import BaseModel
 
 from . import metrics as nomad_metrics
 from ._torch_module_compat import build_torch_module_fastmcp_tool
+from .accelerator import device_memory, empty_accelerator_cache
 from .config import ToolManagerConfig
 from .fm_base_tool import TorchModuleTool
 from .metrics import Observation
@@ -26,21 +26,6 @@ from .model_rpc import ModelProcess, RemoteModel
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 _DEVICE_MEMORY_SNAPSHOT_SECONDS = 1.0
-
-
-def empty_accelerator_cache() -> None:
-    """Release unused Python and accelerator memory back to the runtime."""
-    gc.collect()
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    elif torch.backends.mps.is_available():
-        # torch.accelerator.memory asserts on MPS, which lacks a DeviceAllocator.
-        torch.mps.empty_cache()
-    else:
-        accelerator = getattr(torch, "accelerator", None)
-        if accelerator is not None and accelerator.is_available():
-            accelerator.memory.empty_cache()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1650,22 +1635,7 @@ class TorchModelToolManager:
         device: torch.device,
         kind: str,
     ) -> int | None:
-        if device.type == "cuda":
-            index = (
-                device.index
-                if device.index is not None
-                else torch.cuda.current_device()
-            )
-            if kind == "allocated":
-                return int(torch.cuda.memory_allocated(index))
-            if kind == "reserved":
-                return int(torch.cuda.memory_reserved(index))
-        if device.type == "mps":
-            if kind == "allocated" and hasattr(torch.mps, "current_allocated_memory"):
-                return int(torch.mps.current_allocated_memory())
-            if kind == "reserved" and hasattr(torch.mps, "driver_allocated_memory"):
-                return int(torch.mps.driver_allocated_memory())
-        return None
+        return device_memory(device).get(kind)
 
     def _device_utilization_value(self, device: torch.device) -> float | None:
         if device.type != "cuda" or not hasattr(torch.cuda, "utilization"):

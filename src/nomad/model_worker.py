@@ -9,6 +9,7 @@ import traceback
 from collections.abc import Mapping
 from typing import Any, TextIO
 
+from nomad import accelerator
 from nomad._torch_module_compat import is_torch_module_tool_instance
 from nomad.jsonrpc import Dispatcher, Handler, encode_line, encode_response
 
@@ -97,43 +98,13 @@ class ModelWorker:
 
     @staticmethod
     def clear_cache() -> None:
-        gc.collect()
-        try:
-            import torch
-        except ImportError:  # pragma: no cover
-            return
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        mps = getattr(torch, "mps", None)
-        if mps is not None and hasattr(mps, "empty_cache"):
-            mps.empty_cache()
+        accelerator.empty_accelerator_cache()
 
     @staticmethod
     def device_memory(params: Mapping[str, Any]) -> dict[str, int]:
-        try:
-            import torch
-        except ImportError:  # pragma: no cover
-            return {}
+        import torch
 
-        device = torch.device(str(params["device"]))
-        if device.type == "cuda":
-            index = (
-                device.index
-                if device.index is not None
-                else torch.cuda.current_device()
-            )
-            return {
-                "allocated": int(torch.cuda.memory_allocated(index)),
-                "reserved": int(torch.cuda.memory_reserved(index)),
-            }
-        if device.type == "mps":
-            result = {}
-            if hasattr(torch.mps, "current_allocated_memory"):
-                result["allocated"] = int(torch.mps.current_allocated_memory())
-            if hasattr(torch.mps, "driver_allocated_memory"):
-                result["reserved"] = int(torch.mps.driver_allocated_memory())
-            return result
-        return {}
+        return accelerator.device_memory(torch.device(str(params["device"])))
 
     def _discard_tool(self) -> None:
         if self.tool is None:
