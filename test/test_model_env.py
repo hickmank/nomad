@@ -471,6 +471,36 @@ def test_environment_creation_falls_back_to_stdlib_venv(monkeypatch, tmp_path: P
     assert not (environment.cache_dir / ".nomad-requirements.txt").exists()
 
 
+def test_environment_build_failure_names_target_and_export_hint(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setenv("NOMAD_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(model_env.shutil, "which", lambda command: "/bin/uv")
+
+    def failing_run(command: list[str], *, cwd: Path) -> None:
+        raise model_env.subprocess.CalledProcessError(2, command)
+
+    # Exercise the real _run so its exit-status message is covered too.
+    monkeypatch.setattr(
+        model_env.subprocess,
+        "run",
+        lambda command, **kwargs: failing_run(command, cwd=kwargs["cwd"]),
+    )
+    environment = model_env.resolve_model_environment(
+        ["demo-package==1.0"], base_dir=tmp_path
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        environment.ensure()
+
+    message = str(exc_info.value)
+    assert message.startswith("uv exited with status 2 while building")
+    assert "['demo-package==1.0']" in message
+    assert "NOMAD_CACHE" in message
+    # The failed build leaves no partial environment behind.
+    assert not any((tmp_path / "cache" / "venv").glob(".*.tmp-*"))
+
+
 @pytest.mark.parametrize("builder", ["uv", "venv"])
 def test_real_cached_environment_runs_worker(
     builder: str,

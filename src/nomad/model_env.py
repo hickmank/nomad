@@ -117,8 +117,18 @@ class ModelEnvironment:
                     expected_marker, encoding="utf-8"
                 )
                 temporary.replace(target)
-            except BaseException:
+            except BaseException as exc:
                 shutil.rmtree(temporary, ignore_errors=True)
+                if isinstance(exc, RuntimeError):
+                    # The installer's own output is already on stderr; add what
+                    # was being built and the usual cause for exported bundles.
+                    raise RuntimeError(
+                        f"{exc} while building model environment {target} for "
+                        f"requirements {list(self.requirements)!r}. If this "
+                        "server runs from a `nomad export` bundle, check that "
+                        "NOMAD_CACHE points at the export directory and that it "
+                        "runs with the same Python and Nomad as the export."
+                    ) from exc
                 raise
 
         return _venv_python(target)
@@ -333,7 +343,7 @@ def _run(command: list[str], *, cwd: Path) -> None:
         subprocess.run(command, cwd=cwd, check=True)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            f"Failed to construct model environment with {Path(command[0]).name}"
+            f"{Path(command[0]).name} exited with status {exc.returncode}"
         ) from exc
 
 
