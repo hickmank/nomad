@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -604,6 +605,17 @@ def test_python_keeps_interpreter_symlink(tmp_path: Path):
     assert environment.python == link
     assert environment.is_venv
     assert environment.ensure() == link
+
+
+def test_existing_environment_warns_on_construction(caplog, tmp_path: Path):
+    python = tmp_path / "bin" / "python"
+
+    with caplog.at_level(logging.WARNING, logger="nomad.model_env"):
+        model_env.ExistingEnvironment(python=python)
+
+    [record] = caplog.records
+    assert str(python) in record.getMessage()
+    assert "development-only" in record.getMessage()
 
 
 def test_existing_environment_checksum_depends_on_interpreter(tmp_path: Path):

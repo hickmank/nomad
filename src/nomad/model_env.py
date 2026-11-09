@@ -189,6 +189,16 @@ class ExistingEnvironment:
     python: Path
     base_dir: Path = field(default_factory=Path.cwd)
 
+    def __post_init__(self) -> None:
+        # Nomad neither builds nor bundles this interpreter, so anything that
+        # relies on it is not deployable as is; say so wherever one is created.
+        logger.warning(
+            "Using external interpreter %s; python: is development-only and a "
+            "server that relies on it is not deployable by itself (use env for "
+            "deployment)",
+            self.python,
+        )
+
     @property
     def checksum(self) -> str:
         digest = blake2b()

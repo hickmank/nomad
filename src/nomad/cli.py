@@ -239,17 +239,6 @@ def serve(
         fm_name = fm_config.tool_name or fm_config.name_or_path
         try:
             LOGGER.info("Registering torch model '%s'", fm_name)
-            # ``python:`` points at an interpreter Nomad neither builds nor
-            # bundles, so remind operators this server is not deployable as is.
-            python = getattr(fm_config, "python", None)
-            if python is not None:
-                LOGGER.warning(
-                    "Model '%s' runs in external interpreter %s; python: is "
-                    "development-only and this server is not deployable by "
-                    "itself (use env for deployment)",
-                    fm_name,
-                    python,
-                )
             remote = config.build_remote(fm_config)
             manager.register_remote_tool(remote)
             source = Path(remote.source)
