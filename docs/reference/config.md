@@ -48,29 +48,11 @@ requirements. `requirements.txt` and `pyproject.toml` paths are not supported.
 Direct references must use absolute URLs, such as
 `my-package @ file:///opt/packages/my-package`.
 
-Alternatively, during development, set `python` to an existing interpreter,
-such as a virtual environment's `bin/python` or a conda environment's
-`bin/python`. This serves a model from an environment you already maintain (for
-example, a training framework's environment) without packaging it first.
-Relative paths resolve against the
-config file's directory, and `${VAR}` placeholders are expanded. The interpreter
-must be able to import `nomad` and the model's `model_class`. `env` and `python`
-are mutually exclusive.
-
-```yaml
-fmod_models:
-  - model_class: my_package.models.MyTorchTool
-    name_or_path: file:models/my-model
-    python: ${MODEL_ENV}/bin/python
-    tool_name: my-model
-```
-
 :::{warning}
-`python` is for development only. Nomad does not build, pin, or bundle an
-interpreter set this way, so a server that relies on it is not deployable on
-its own: every host that runs it must already provide a matching environment
-at that path. Before you deploy, replace `python` with `env` requirements, or
-ship the model's environment in a container image.
+Use `env` for every model you intend to deploy. A model may instead set
+`python` to an existing interpreter (mutually exclusive with `env`), but this
+is unsupported outside local development: Nomad does not build, pin, or export
+that environment, so the server is not deployable.
 :::
 
 Models run in per-device Python subprocesses. When `env` is omitted, the
@@ -102,14 +84,8 @@ export` inside your container image build; see
 {doc}`Offline Container Images </deployments/offline-images>`. Pass `--no-venv`
 to omit environments from an export, which leaves `build_envs` unchanged.
 
-A model's `python` interpreter is never copied into the bundle, and `nomad
-export` warns that the bundle is not self-contained for that model. Such a
-bundle is not a deployable artifact; see the warning above. Values that
-use `${VAR}` or `${VAR:DEFAULT}` placeholders are written to the exported config
-unexpanded, so each deployment resolves the interpreter from its own
-environment; set the variable when serving the bundle. Other values are
-rewritten as absolute paths on the export host. To ship a model's full Python
-environment, build a container image instead.
+`nomad export` does not support `python` models; it warns that the bundle is
+not self-contained for them.
 
 | Name | Example |
 | --- | --- |
