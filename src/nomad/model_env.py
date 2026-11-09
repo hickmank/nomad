@@ -10,9 +10,12 @@ from dataclasses import dataclass, field
 from hashlib import blake2b
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 from uuid import uuid4
 
 from filelock import FileLock
+from packaging.requirements import InvalidRequirement, Requirement
 
 from .hub import get_cache_root
 
@@ -21,6 +24,27 @@ logger = logging.getLogger(__name__)
 _COMPLETE_MARKER = ".nomad-complete"
 _CACHE_FORMAT = "3"
 _HASH_PREFIX = "nomad-venv-"
+# Directories skipped when hashing a local package: VCS metadata, caches,
+# virtual environments, and build output. They are large, change without the
+# package changing, and are not what an installer builds from.
+_SKIPPED_SOURCE_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "build",
+        "dist",
+        "node_modules",
+        ".tox",
+        ".nox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +58,16 @@ class ModelEnvironment:
     # download packages. It is a runtime policy, not part of the environment's
     # identity, so it is excluded from equality and from the checksum.
     allow_build: bool = field(default=True, compare=False)
+    # Digest of the local ``file:`` packages in ``requirements``, taken once at
+    # construction: the checksum is read on every model load, and re-hashing a
+    # source tree each time would be slow.
+    local_sources: bytes = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        digest = blake2b()
+        for _name, path in _local_requirement_paths(self.requirements):
+            digest.update(_local_source_digest(path))
+        object.__setattr__(self, "local_sources", digest.digest())
 
     @property
     def contents(self) -> bytes:
@@ -57,6 +91,11 @@ class ModelEnvironment:
         digest.update(nomad_project)
         digest.update(b"\0python-runtime\0")
         digest.update(_python_runtime_identity())
+        # Local ``file:`` packages are identified by their contents, not just
+        # their path, so editing one gives a new environment instead of
+        # silently reusing a stale build.
+        digest.update(b"\0local-sources\0")
+        digest.update(self.local_sources)
         return digest.hexdigest()
 
     @property
@@ -93,7 +132,9 @@ class ModelEnvironment:
                 "Model environment is not prebuilt and building is disabled "
                 f"(tool_manager.build_envs is false). Expected {target}. Run "
                 "`nomad export` with the same Python and Nomad installation that "
-                "serves the bundle, and set NOMAD_CACHE to the export directory."
+                "serves the bundle, and set NOMAD_CACHE to the export directory. "
+                "Local file:// packages in env must also still exist, unchanged, "
+                "at the same paths."
             )
 
         root.mkdir(parents=True, exist_ok=True)
@@ -154,6 +195,11 @@ class ModelEnvironment:
                 cwd=self.base_dir,
             )
             installer = [uv, "pip", "install", "--python", str(_venv_python(target))]
+            # uv reuses wheels it built from local directories unless their
+            # build metadata changes, so force a fresh build of each local
+            # package; the checksum already says its contents changed.
+            for name, _path in _local_requirement_paths(self.requirements):
+                installer += ["--refresh-package", name]
         else:
             logger.info(
                 "uv is unavailable; creating model environment %s with venv",
@@ -285,6 +331,76 @@ def resolve_model_environment(
         base_dir=resolved_base,
         allow_build=allow_build,
     )
+
+
+def _local_requirement_paths(
+    requirements: tuple[str, ...],
+) -> list[tuple[str, Path]]:
+    """Return ``(name, path)`` for each requirement that is a local ``file:`` URL.
+
+    Only plain ``file:`` URLs are included. VCS URLs such as ``git+file:``
+    install a commit rather than the working tree, so their contents do not
+    affect the build in the same way.
+    """
+    local: list[tuple[str, Path]] = []
+    for requirement in requirements:
+        try:
+            parsed = Requirement(requirement)
+        except InvalidRequirement:
+            continue
+        if parsed.url is None:
+            continue
+        url = urlsplit(parsed.url)
+        if url.scheme != "file":
+            continue
+        local.append((parsed.name, Path(url2pathname(url.path))))
+    return local
+
+
+def _local_source_digest(path: Path) -> bytes:
+    """Return a digest of a local package file or source tree.
+
+    Directories are walked in sorted order, hashing each file's relative path
+    and contents and skipping ``_SKIPPED_SOURCE_DIRS``, ``*.egg-info``, and any
+    virtual environment (a directory containing ``pyvenv.cfg``).
+    Symlinked directories are not followed. A missing path gets a fixed digest
+    so the installer reports the real error.
+
+    Args:
+        path: The file or directory a ``file:`` requirement points at.
+
+    Returns:
+        The digest bytes.
+    """
+    digest = blake2b()
+    digest.update(str(path).encode())
+    if path.is_file():
+        digest.update(b"\0file\0")
+        digest.update(path.read_bytes())
+        return digest.digest()
+    if not path.is_dir():
+        digest.update(b"\0missing\0")
+        return digest.digest()
+
+    for root, dirs, files in os.walk(path):
+        # Prune in place so os.walk does not descend into skipped directories,
+        # and sort so the digest does not depend on directory listing order.
+        dirs[:] = sorted(
+            name
+            for name in dirs
+            if name not in _SKIPPED_SOURCE_DIRS
+            and not name.endswith(".egg-info")
+            and not (Path(root) / name / "pyvenv.cfg").is_file()
+        )
+        for name in sorted(files):
+            file_path = Path(root) / name
+            if not file_path.is_file():
+                continue
+            digest.update(b"\0path\0")
+            digest.update(file_path.relative_to(path).as_posix().encode())
+            digest.update(b"\0contents\0")
+            digest.update(file_path.read_bytes())
+    return digest.digest()
 
 
 def _venv_python(venv: Path) -> Path:

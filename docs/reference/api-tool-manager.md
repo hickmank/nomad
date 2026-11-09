@@ -33,7 +33,10 @@ host. For explicit environments, Nomad prefers `uv` to create the virtual
 environment and falls back to the standard-library `venv` module. Explicit
 environments are content-addressed under
 `$XDG_CACHE_HOME/nomad/venv` (or `~/.cache/nomad/venv`) and reused across
-models with the same requirements. Nomad injects the currently running Nomad
+models with the same requirements. For a local `file://` requirement, the key
+also covers the referenced package's contents (skipping VCS, cache, virtual
+environment, and build directories), so editing the package builds a fresh
+environment. Nomad injects the currently running Nomad
 package into each explicit environment's requirements. A slot keeps its
 subprocess when switching between models with the same environment;
 `tool_manager.venv_idle_seconds` controls when an idle subprocess is terminated

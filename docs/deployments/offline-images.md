@@ -79,7 +79,10 @@ CMD ["nomad", "serve", "/opt/nomad/nomad.yml", \
 
 `env` direct references must use paths that exist inside the image. Either
 write them as image paths, as above, or use a placeholder such as
-`file://${SRC}/my-model-package` and set `SRC` in the build.
+`file://${SRC}/my-model-package` and set `SRC` in the build. Keep those
+sources in the final image, unchanged: Nomad identifies a bundled environment
+partly by the contents of its local packages, so a server whose image lacks
+them reports the environment as not prebuilt.
 `NOMAD_CACHE` must point at the export directory when the server runs, so that
 Nomad finds the bundled environments.
 

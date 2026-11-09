@@ -29,6 +29,9 @@ def _expected_checksum(
     digest.update(nomad_project)
     digest.update(b"\0python-runtime\0")
     digest.update(model_env._python_runtime_identity())
+    # No local file: packages, so the local-sources digest is of nothing.
+    digest.update(b"\0local-sources\0")
+    digest.update(blake2b().digest())
     return digest.hexdigest()
 
 
@@ -217,6 +220,85 @@ def test_build_permission_does_not_change_environment_identity(tmp_path: Path):
 
     assert offline.checksum == building.checksum
     assert offline == building
+
+
+def _local_package(root: Path) -> Path:
+    package = root / "demo-local"
+    (package / "src" / "demo_local").mkdir(parents=True)
+    (package / "pyproject.toml").write_text("[project]\nname = 'demo-local'\n")
+    (package / "src" / "demo_local" / "__init__.py").write_text("VALUE = 1\n")
+    return package
+
+
+def test_local_file_requirement_checksum_tracks_source_contents(tmp_path: Path):
+    package = _local_package(tmp_path)
+    requirement = f"demo-local @ {package.as_uri()}"
+
+    def checksum() -> str:
+        return model_env.resolve_model_environment(
+            [requirement], base_dir=tmp_path
+        ).checksum
+
+    original = checksum()
+    assert checksum() == original
+
+    # Generated and VCS directories, including any virtual environment, do not
+    # change the identity of the package.
+    for skipped in (".git", "__pycache__", "build", "demo_local.egg-info", "env"):
+        (package / skipped).mkdir()
+        (package / skipped / "noise.txt").write_text("noise")
+    (package / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    assert checksum() == original
+
+    # Editing a source file does.
+    (package / "src" / "demo_local" / "__init__.py").write_text("VALUE = 2\n")
+    assert checksum() != original
+
+
+def test_local_file_requirement_checksum_hashes_single_files(tmp_path: Path):
+    wheel = tmp_path / "demo_local-1.0-py3-none-any.whl"
+    wheel.write_bytes(b"first")
+    requirement = f"demo-local @ {wheel.as_uri()}"
+    first = model_env.resolve_model_environment([requirement]).checksum
+
+    wheel.write_bytes(b"second")
+
+    assert model_env.resolve_model_environment([requirement]).checksum != first
+
+
+def test_uv_refreshes_only_local_file_packages(monkeypatch, tmp_path: Path):
+    commands: list[list[str]] = []
+    monkeypatch.setenv("NOMAD_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(model_env.shutil, "which", lambda command: "/bin/uv")
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        commands.append(command)
+        if command[1] == "venv":
+            target = Path(command[-1])
+            (target / "bin").mkdir(parents=True)
+            (target / "bin" / "python").touch()
+
+    monkeypatch.setattr(model_env, "_run", fake_run)
+    package = _local_package(tmp_path)
+    environment = model_env.resolve_model_environment(
+        [
+            f"demo-local @ {package.as_uri()}",
+            "remote-package==1.0",
+            "vcs-package @ git+file:///srv/vcs-package",
+        ],
+        base_dir=tmp_path,
+    )
+
+    environment.ensure()
+
+    install = commands[1]
+    assert install[1:3] == ["pip", "install"]
+    refreshed = [
+        install[index + 1]
+        for index, argument in enumerate(install)
+        if argument == "--refresh-package"
+    ]
+    assert refreshed == ["demo-local"]
 
 
 def test_environment_cache_is_reused(monkeypatch, tmp_path: Path):
