@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 
 import pytest
@@ -180,3 +181,45 @@ def test_frames_round_trip_and_enforce_max_size():
         asyncio.run(read(frame, max_size=4))
     with pytest.raises(ValueError, match="max size"):
         jsonrpc.encode_frame(payload, max_size=4)
+
+
+def test_jsonrpc_server_serves_tagged_methods_until_stopped():
+    class EchoServer(jsonrpc.JSONRPCServer):
+        @jsonrpc.rpc_method
+        def echo(self, params):
+            return params
+
+        @staticmethod
+        @jsonrpc.rpc_method
+        def add(params):
+            return params["a"] + params["b"]
+
+        @jsonrpc.rpc_method
+        def stop_now(self, _params):
+            self.stop()
+
+        def helper(self, params):  # untagged, so not exposed
+            return params
+
+    server = EchoServer()
+    assert set(server.handlers()) == {"echo", "add", "stop_now"}
+
+    requests = [
+        jsonrpc.make_request("echo", {"x": 1}, request_id=1),
+        jsonrpc.make_request("add", {"a": 2, "b": 3}, request_id=2),
+        jsonrpc.make_request("helper", request_id=3),
+        jsonrpc.make_request("stop_now", request_id=4),
+        jsonrpc.make_request("echo", request_id=5),
+    ]
+    stdin = io.StringIO("".join(json.dumps(request) + "\n" for request in requests))
+    stdout = io.StringIO()
+
+    assert server.start(stdin, stdout) == 0
+
+    responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    # The request after stop_now is never read.
+    assert [response["id"] for response in responses] == [1, 2, 3, 4]
+    assert responses[0]["result"] == {"x": 1}
+    assert responses[1]["result"] == 5
+    assert responses[2]["error"]["code"] == jsonrpc.METHOD_NOT_FOUND
+    assert responses[3]["result"] is None

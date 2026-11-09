@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import contextlib
 import gc
 import importlib
-import os
 import sys
-import traceback
 from collections.abc import Mapping
 from typing import Any, TextIO
 
@@ -13,7 +10,7 @@ import torch
 
 from nomad import accelerator
 from nomad._torch_module_compat import is_torch_module_tool_instance
-from nomad.jsonrpc import Dispatcher, Handler, encode_line, encode_response
+from nomad.jsonrpc import JSONRPCServer, rpc_method
 
 
 def _resolve_symbol(dotted_path: str) -> Any:
@@ -23,26 +20,15 @@ def _resolve_symbol(dotted_path: str) -> Any:
     return getattr(importlib.import_module(module_path), attribute)
 
 
-class ModelWorker:
+class ModelWorker(JSONRPCServer):
     def __init__(self) -> None:
+        super().__init__()
         self.tool: Any = None
         # Identifies which model ``self.tool`` was loaded from, so ``run_batch``
         # can tell whether the requested model is already resident.
         self._loaded_key: tuple[str, str, str | None] | None = None
-        self.should_stop = False
 
-    def handlers(self) -> dict[str, Handler]:
-        return {
-            "load": self.load,
-            "run_batch": self.run_batch,
-            "offload": lambda _params: self.offload(),
-            "unload": lambda _params: self._discard_tool(),
-            "clear_cache": lambda _params: self.clear_cache(),
-            "device_memory": self.device_memory,
-            "set_batch_size": self.set_batch_size,
-            "shutdown": self.shutdown,
-        }
-
+    @rpc_method
     def load(self, params: Mapping[str, Any]) -> dict[str, Any]:
         self._discard_tool()
         model_class = _resolve_symbol(str(params["model_class"]))
@@ -69,6 +55,7 @@ class ModelWorker:
             "output_schema": tool.output_schema.model_json_schema(),
         }
 
+    @rpc_method
     def run_batch(self, params: Mapping[str, Any]) -> list[Any]:
         # The request carries the model's load parameters, so a worker whose
         # model was unloaded or offloaded can always serve it; there is no
@@ -84,24 +71,33 @@ class ModelWorker:
             for output in outputs
         ]
 
+    @rpc_method
     def set_batch_size(self, params: Mapping[str, Any]) -> None:
         # With no model loaded there is nothing to resize; run_batch passes its
         # batch size on every call anyway.
         if self.tool is not None:
             self.tool.batch_size = max(1, int(params["batch_size"]))
 
+    @rpc_method
     def shutdown(self, _params: Mapping[str, Any]) -> None:
-        self.should_stop = True
+        self.stop()
 
-    def offload(self) -> None:
+    @rpc_method
+    def offload(self, _params: Mapping[str, Any] | None = None) -> None:
         if self.tool is not None:
             self._move_tool(torch.device("cpu"))
 
+    @rpc_method
+    def unload(self, _params: Mapping[str, Any]) -> None:
+        self._discard_tool()
+
     @staticmethod
-    def clear_cache() -> None:
+    @rpc_method
+    def clear_cache(_params: Mapping[str, Any]) -> None:
         accelerator.empty_accelerator_cache()
 
     @staticmethod
+    @rpc_method
     def device_memory(params: Mapping[str, Any]) -> dict[str, int]:
         return accelerator.device_memory(torch.device(str(params["device"])))
 
@@ -145,39 +141,8 @@ def _model_key(params: Mapping[str, Any]) -> tuple[str, str, str | None]:
     )
 
 
-def _print_exception(exc: Exception) -> None:
-    traceback.print_exception(exc, file=sys.stderr)
-
-
 def main(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
-    worker = ModelWorker()
-    protocol_stdout = stdout
-    close_protocol_stdout = False
-    if stdout is sys.stdout and hasattr(stdout, "fileno"):
-        protocol_fd = os.dup(stdout.fileno())
-        os.dup2(sys.stderr.fileno(), stdout.fileno())
-        protocol_stdout = os.fdopen(
-            protocol_fd,
-            "w",
-            encoding=stdout.encoding or "utf-8",
-            buffering=1,
-        )
-        close_protocol_stdout = True
-
-    try:
-        with contextlib.redirect_stdout(sys.stderr):
-            dispatcher = Dispatcher(worker.handlers(), on_error=_print_exception)
-            for line in stdin:
-                response = dispatcher.dispatch(line)
-                if response is not None:
-                    protocol_stdout.write(encode_response(response, encode_line))
-                    protocol_stdout.flush()
-                if worker.should_stop:
-                    break
-    finally:
-        if close_protocol_stdout:
-            protocol_stdout.close()
-    return 0
+    return ModelWorker().start(stdin, stdout)
 
 
 if __name__ == "__main__":

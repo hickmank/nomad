@@ -4,7 +4,8 @@ Nomad speaks JSON-RPC 2.0 (https://www.jsonrpc.org/specification) on two
 channels: between the server and its model workers (newline-delimited over
 stdio) and between the code-mode gateway and its sandbox runtime
 (length-prefixed over TCP). This module holds what both channels share; each
-channel owns its transport.
+channel owns its transport, except that ``JSONRPCServer`` provides the
+newline-delimited stdio server loop used by model workers.
 
 Methods take by-name params, and batch requests are not supported. The module
 depends only on the standard library because model workers and the sandbox
@@ -14,11 +15,15 @@ runtime import it from interpreters other than the Nomad host's.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
+import os
+import sys
+import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TextIO
 
 JSONRPC_VERSION = "2.0"
 
@@ -34,6 +39,8 @@ FRAME_HEADER_SIZE = 4
 DEFAULT_MAX_FRAME_SIZE = 16 * 1024 * 1024
 
 Handler = Callable[[dict[str, Any]], Any]
+
+_RPC_METHOD_ATTRIBUTE = "__jsonrpc_method__"
 
 
 class JSONRPCError(RuntimeError):
@@ -238,6 +245,89 @@ class Dispatcher:
         return response
 
 
+def rpc_method[F: Callable[..., Any]](func: F) -> F:
+    """Expose a ``JSONRPCServer`` method as the RPC method of the same name.
+
+    The method is called with the request's params mapping. Apply it beneath
+    ``@staticmethod`` when combining the two.
+    """
+    setattr(func, _RPC_METHOD_ATTRIBUTE, func.__name__)
+    return func
+
+
+class JSONRPCServer:
+    """Serve a subclass's ``@rpc_method`` methods over newline-delimited stdio.
+
+    Subclasses tag their RPC methods with ``rpc_method`` and run ``start``; a
+    handler calls ``stop`` to end the loop once its response is written.
+    """
+
+    def __init__(self) -> None:
+        self._stopping = False
+
+    def handlers(self) -> dict[str, Handler]:
+        """Return the bound ``@rpc_method`` methods keyed by RPC method name."""
+        handlers: dict[str, Handler] = {}
+        for attribute in dir(type(self)):
+            # Inspect the class statically so that discovering methods never
+            # evaluates properties or other descriptors.
+            value = inspect.getattr_static(self, attribute)
+            func = getattr(value, "__func__", value)
+            method_name = getattr(func, _RPC_METHOD_ATTRIBUTE, None)
+            if method_name is not None:
+                handlers[method_name] = getattr(self, attribute)
+        return handlers
+
+    def stop(self) -> None:
+        """Make ``start`` return after the current request is answered."""
+        self._stopping = True
+
+    def on_error(self, exc: Exception) -> None:
+        """Report an exception raised by a handler; prints to stderr by default."""
+        traceback.print_exception(exc, file=sys.stderr)
+
+    def start(self, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
+        """Answer requests read from ``stdin`` until it closes or ``stop`` is called.
+
+        Args:
+            stdin: Stream of newline-delimited requests.
+            stdout: Stream that receives newline-delimited responses.
+
+        Returns:
+            The process exit code, ``0``.
+        """
+        protocol_stdout = stdout
+        close_protocol_stdout = False
+        if stdout is sys.stdout and hasattr(stdout, "fileno"):
+            # Keep a private copy of the real stdout for protocol messages and
+            # point file descriptor 1 at stderr, so output written by handler
+            # code (including native extensions) cannot corrupt the protocol.
+            protocol_fd = os.dup(stdout.fileno())
+            os.dup2(sys.stderr.fileno(), stdout.fileno())
+            protocol_stdout = os.fdopen(
+                protocol_fd,
+                "w",
+                encoding=stdout.encoding or "utf-8",
+                buffering=1,
+            )
+            close_protocol_stdout = True
+
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                dispatcher = Dispatcher(self.handlers(), on_error=self.on_error)
+                for line in stdin:
+                    response = dispatcher.dispatch(line)
+                    if response is not None:
+                        protocol_stdout.write(encode_response(response, encode_line))
+                        protocol_stdout.flush()
+                    if self._stopping:
+                        break
+        finally:
+            if close_protocol_stdout:
+                protocol_stdout.close()
+        return 0
+
+
 def encode_response[T: (str, bytes)](
     response: Mapping[str, Any],
     encode: Callable[[Mapping[str, Any]], T],
@@ -304,6 +394,7 @@ __all__ = [
     "PARSE_ERROR",
     "SERVER_ERROR",
     "Dispatcher",
+    "JSONRPCServer",
     "ProtocolError",
     "Request",
     "decode",
@@ -316,4 +407,5 @@ __all__ = [
     "parse_request",
     "parse_response",
     "read_frame",
+    "rpc_method",
 ]
