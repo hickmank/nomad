@@ -7,8 +7,9 @@ needed only while the image is built.
 ## Bundle, Image, and Container
 
 - **Bundle**: the directory `nomad export` writes. It holds the rewritten
-  `nomad.yml`, the model files under `models/`, and one virtual environment per
-  distinct `env` under `venv/`.
+  `nomad.yml`, the model files under `models/`, copies of any local `file://`
+  packages under `packages/`, and one virtual environment per distinct `env`
+  under `venv/`.
 - **Image**: a read-only snapshot of a complete filesystem (operating system,
   Python, Nomad, and the bundle). You build it once and copy it to other
   machines.
@@ -86,6 +87,10 @@ Export copies each local package into the bundle and points the exported config
 at the copy.
 `NOMAD_CACHE` must point at the export directory when the server runs, so that
 Nomad finds the bundled environments.
+
+`nomad export` builds the environments without loading the models. Pass
+`--no-venv` to omit them, which also leaves `tool_manager.build_envs`
+unchanged. Export fails if any model sets `python` instead of `env`.
 
 ## Building Behind a TLS-Intercepting Proxy
 
