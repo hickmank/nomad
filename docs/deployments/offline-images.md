@@ -88,31 +88,17 @@ Nomad finds the bundled environments.
 
 ## Building Behind a TLS-Intercepting Proxy
 
-Some networks route HTTPS through a proxy that re-signs traffic with its own
-root certificate. Downloads then fail with errors such as
-`certificate signed by unknown authority` or `CERTIFICATE_VERIFY_FAILED` until
-two separate places trust that root:
-
-1. **The container engine**, which pulls base images such as
-   `python:3.13-slim`. Add the root to the engine host's trust store. On macOS
-   and Windows, the engine runs in a Linux virtual machine with its own trust
-   store, so add the root inside that machine and restart the engine there.
-2. **The build steps**, which download Python packages. The example
-   Dockerfile mounts an optional build secret named `nomad_build_ca` over the
-   image's system CA bundle for the two steps that download, and
-   `UV_SYSTEM_CERTS=1` makes `uv` use that bundle. Pass a complete replacement
-   bundle, with the public roots plus the proxy root:
-
-   ```shell
-   docker buildx build \
-     --secret id=nomad_build_ca,src=/path/to/ca-bundle.pem \
-     --tag my-server:latest .
-   ```
-
-The secret is only visible while those steps run and is not stored in the
-image. Offline containers make no outbound connections, so the finished image
-does not need the proxy root. To trust extra roots at run time anyway, see
+The example Dockerfile's download steps accept a CA bundle as an optional
+build secret named `nomad_build_ca`, which `uv` uses through
+`UV_SYSTEM_CERTS=1`. The secret is not stored in the image. For what the bundle
+must contain, see
 [Passing Custom CA Certificates to the Image](guide.md#passing-custom-ca-certificates-to-the-image).
+
+```shell
+docker buildx build \
+  --secret id=nomad_build_ca,src=/path/to/ca-bundle.pem \
+  --tag my-server:latest .
+```
 
 ## Running the Image
 
