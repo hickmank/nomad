@@ -618,12 +618,17 @@ the {doc}`Nomad Inference notebook </guides/nomad_inference>`.
 If you are wiring a new model into the repository's demo deployment scaffold,
 update these files together:
 
-- {repo_file}`container/demo/pyproject.toml <container/demo/pyproject.toml>`:
-  add your model package to `dependencies`, and add or update the matching
-  `[tool.uv.sources]` entry if the package comes from Git or a local checkout.
 - {repo_file}`container/demo/nomad.yml <container/demo/nomad.yml>`:
-  add your `fmod_models` entry, plus any helper `tools` entries and
-  `tool_manager` settings needed for batching or queue depth.
+  add your `fmod_models` entry with `env` set to your model package, for
+  example a Git direct reference such as
+  `my-pkg @ git+https://example.org/my-org/my-pkg.git@v1.2`. Nomad builds that
+  model its own environment, so its dependencies never touch the demo's. Add
+  any helper `tools` entries and `tool_manager` settings needed for batching
+  or queue depth.
+- {repo_file}`container/demo/pyproject.toml <container/demo/pyproject.toml>`:
+  only for code that runs in the server's own environment, such as `tools`
+  callables. Add the package to `dependencies`, with a matching
+  `[tool.uv.sources]` entry if it comes from Git or a local checkout.
 - {repo_file}`container/model-card.md <container/model-card.md>`:
   use this template when you are shipping a local model directory that needs a
   model card in the exported bundle.
