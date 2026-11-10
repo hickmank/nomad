@@ -242,7 +242,12 @@ class HostEnvironment:
 
 @dataclass(frozen=True, slots=True)
 class ExistingEnvironment:
-    """A pre-built Python interpreter (venv or conda) managed outside Nomad."""
+    """A pre-built Python interpreter (venv or conda) managed outside Nomad.
+
+    .. warning::
+       For local development purposes only. ExistingEnvironments cannot be
+       bundled and deployed reliably.
+    """
 
     python: Path
     base_dir: Path = field(default_factory=Path.cwd)
