@@ -4,8 +4,9 @@ Nomad speaks JSON-RPC 2.0 (https://www.jsonrpc.org/specification) on two
 channels: between the server and its model workers (newline-delimited over
 stdio) and between the code-mode gateway and its sandbox runtime
 (length-prefixed over TCP). This module holds what both channels share; each
-channel owns its transport, except that ``JSONRPCServer`` provides the
-newline-delimited stdio server loop used by model workers.
+channel owns its transport, except that ``JSONRPCServer`` and ``JSONRPCClient``
+provide the two ends of the newline-delimited stdio channel used by model
+workers.
 
 Methods take by-name params, and batch requests are not supported. The module
 depends only on the standard library because model workers and the sandbox
@@ -20,9 +21,12 @@ import inspect
 import json
 import os
 import sys
+import threading
+import time
 import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from queue import Empty, Queue
 from typing import Any, TextIO
 
 JSONRPC_VERSION = "2.0"
@@ -328,6 +332,168 @@ class JSONRPCServer:
         return 0
 
 
+class JSONRPCClient:
+    """Send requests to a newline-delimited JSON-RPC peer and wait for replies.
+
+    One request is in flight at a time; concurrent callers queue on a lock. A
+    background thread reads the peer's responses so that a request can give up
+    at its deadline instead of blocking in ``readline``.
+    """
+
+    def __init__(
+        self,
+        writer: TextIO,
+        reader: TextIO,
+        *,
+        timeout_seconds: float | None = 30.0,
+        on_failure: Callable[[], None] | None = None,
+        name: str = "jsonrpc",
+    ) -> None:
+        """Start reading responses from ``reader``.
+
+        Args:
+            writer: Stream that requests are written to.
+            reader: Stream of newline-delimited responses.
+            timeout_seconds: Deadline for each request, including waiting for
+                the lock and writing the request. ``None`` waits forever.
+            on_failure: Called, with the lock held, when a request times out or
+                the peer sends an invalid response, before the error is raised.
+                Use it to stop a peer that can no longer be trusted.
+            name: Prefix for the names of the client's threads.
+        """
+        self.timeout_seconds = timeout_seconds
+        self._writer = writer
+        self._on_failure = on_failure
+        self._name = name
+        self._request_id = 0
+        # Reentrant so a caller holding the lock (see ``acquire``) can still
+        # call ``send`` or ``request``.
+        self._lock = threading.RLock()
+        self._responses: Queue[str | None] = Queue()
+        self._reader_thread = threading.Thread(
+            target=self._read_responses,
+            args=(reader,),
+            daemon=True,
+            name=f"{name}-stdout",
+        )
+        self._reader_thread.start()
+
+    def acquire(self, timeout: float | None = None) -> bool:
+        """Hold the request lock so no request starts until ``release``."""
+        if timeout is None:
+            return self._lock.acquire()
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self) -> None:
+        """Release a lock taken with ``acquire``."""
+        self._lock.release()
+
+    def request(self, method: str, params: Mapping[str, Any] | None = None) -> Any:
+        """Send one request and return its result.
+
+        Raises:
+            TimeoutError: If the request does not complete within
+                ``timeout_seconds``.
+            ConnectionError: If the request cannot be written or the peer
+                closes its output before replying.
+            ProtocolError: If the peer's response is not valid JSON-RPC.
+            JSONRPCError: If the peer returns an error response.
+        """
+        timeout_seconds = self.timeout_seconds
+        deadline = (
+            None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        )
+        if not self.acquire(timeout_seconds):
+            raise self._timeout_error(method)
+        try:
+            self._request_id += 1
+            request_id = self._request_id
+            self._write(
+                encode_line(make_request(method, params, request_id=request_id)),
+                method=method,
+                deadline=deadline,
+            )
+            response_timeout = (
+                None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+            try:
+                response_line = self._responses.get(timeout=response_timeout)
+            except Empty as exc:
+                self._fail()
+                raise self._timeout_error(method) from exc
+            if response_line is None:
+                raise ConnectionError("Peer closed its output")
+            try:
+                return parse_response(decode(response_line), expected_id=request_id)
+            except ProtocolError:
+                self._fail()
+                raise
+        finally:
+            self.release()
+
+    def send(self, method: str, params: Mapping[str, Any] | None = None) -> None:
+        """Write a request without waiting for its response.
+
+        Raises:
+            ConnectionError: If the request cannot be written.
+        """
+        with self._lock:
+            self._request_id += 1
+            payload = make_request(method, params, request_id=self._request_id)
+            try:
+                self._writer.write(encode_line(payload))
+                self._writer.flush()
+            except (OSError, ValueError) as exc:
+                raise ConnectionError("Cannot write to peer") from exc
+
+    def _write(self, line: str, *, method: str, deadline: float | None) -> None:
+        """Write one line without letting a blocked pipe evade the deadline."""
+        errors: list[BaseException] = []
+        completed = threading.Event()
+
+        def write() -> None:
+            try:
+                self._writer.write(line)
+                self._writer.flush()
+            except BaseException as exc:  # transported back to the request thread
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        if deadline is None:
+            write()
+        else:
+            writer = threading.Thread(
+                target=write, daemon=True, name=f"{self._name}-stdin"
+            )
+            writer.start()
+            if not completed.wait(max(0.0, deadline - time.monotonic())):
+                self._fail()
+                raise self._timeout_error(method)
+
+        if errors:
+            raise ConnectionError("Cannot write to peer") from errors[0]
+
+    def _fail(self) -> None:
+        if self._on_failure is not None:
+            self._on_failure()
+
+    def _timeout_error(self, method: str) -> TimeoutError:
+        assert self.timeout_seconds is not None
+        return TimeoutError(
+            f"JSON-RPC request '{method}' timed out after "
+            f"{self.timeout_seconds:g} seconds"
+        )
+
+    def _read_responses(self, reader: TextIO) -> None:
+        try:
+            for line in reader:
+                self._responses.put(line)
+        finally:
+            # Wake a waiting request when the peer's output ends.
+            self._responses.put(None)
+
+
 def encode_response[T: (str, bytes)](
     response: Mapping[str, Any],
     encode: Callable[[Mapping[str, Any]], T],
@@ -394,6 +560,7 @@ __all__ = [
     "PARSE_ERROR",
     "SERVER_ERROR",
     "Dispatcher",
+    "JSONRPCClient",
     "JSONRPCServer",
     "ProtocolError",
     "Request",

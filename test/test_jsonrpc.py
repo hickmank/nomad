@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
+import threading
+import time
 
 import pytest
 
@@ -223,3 +226,138 @@ def test_jsonrpc_server_serves_tagged_methods_until_stopped():
     assert responses[1]["result"] == 5
     assert responses[2]["error"]["code"] == jsonrpc.METHOD_NOT_FOUND
     assert responses[3]["result"] is None
+
+
+class _Pipe:
+    """A one-way text pipe backed by ``os.pipe``, closed by the test."""
+
+    def __init__(self):
+        read_fd, write_fd = os.pipe()
+        self.reader = os.fdopen(read_fd, "r", encoding="utf-8")
+        self.writer = os.fdopen(write_fd, "w", encoding="utf-8", buffering=1)
+
+    def close(self):
+        for stream in (self.writer, self.reader):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def _serve_one(requests: _Pipe, responses: _Pipe, reply) -> threading.Thread:
+    """Answer one request read from ``requests`` with ``reply(request)``."""
+
+    def run():
+        request = json.loads(requests.reader.readline())
+        line = reply(request)
+        if line is not None:
+            responses.writer.write(line)
+            responses.writer.flush()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_jsonrpc_client_round_trip_and_peer_error():
+    requests, responses = _Pipe(), _Pipe()
+    client = jsonrpc.JSONRPCClient(requests.writer, responses.reader)
+    try:
+        _serve_one(
+            requests,
+            responses,
+            lambda request: jsonrpc.encode_line(
+                jsonrpc.make_result(request["id"], request["params"]["x"] * 2)
+            ),
+        )
+        assert client.request("double", {"x": 4}) == 8
+
+        _serve_one(
+            requests,
+            responses,
+            lambda request: jsonrpc.encode_line(
+                jsonrpc.make_error(request["id"], JSONRPCError("nope", code=-1))
+            ),
+        )
+        with pytest.raises(JSONRPCError, match="nope"):
+            client.request("fail")
+    finally:
+        requests.close()
+        responses.close()
+
+
+def test_jsonrpc_client_times_out_and_calls_on_failure():
+    requests, responses = _Pipe(), _Pipe()
+    failures: list[bool] = []
+    client = jsonrpc.JSONRPCClient(
+        requests.writer,
+        responses.reader,
+        timeout_seconds=0.05,
+        on_failure=lambda: failures.append(True),
+    )
+    try:
+        _serve_one(requests, responses, lambda request: None)  # never replies
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="timed out after 0.05 seconds"):
+            client.request("slow")
+        assert time.monotonic() - started < 0.5
+        assert failures == [True]
+    finally:
+        requests.close()
+        responses.close()
+
+
+def test_jsonrpc_client_timeout_includes_blocked_write():
+    release_write = threading.Event()
+    failures: list[bool] = []
+
+    class BlockingWriter:
+        def write(self, value):
+            release_write.wait(timeout=2)
+
+        def flush(self):
+            pass
+
+    responses = _Pipe()
+
+    def on_failure():
+        failures.append(True)
+        release_write.set()
+
+    client = jsonrpc.JSONRPCClient(
+        BlockingWriter(),  # type: ignore[arg-type]
+        responses.reader,
+        timeout_seconds=0.05,
+        on_failure=on_failure,
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            client.request("blocked")
+        assert time.monotonic() - started < 0.5
+        assert failures == [True]
+    finally:
+        responses.close()
+
+
+def test_jsonrpc_client_reports_closed_peer_and_invalid_response():
+    requests, responses = _Pipe(), _Pipe()
+    failures: list[bool] = []
+    client = jsonrpc.JSONRPCClient(
+        requests.writer,
+        responses.reader,
+        on_failure=lambda: failures.append(True),
+    )
+    try:
+        _serve_one(requests, responses, lambda request: "not json\n")
+        with pytest.raises(ProtocolError):
+            client.request("garbage")
+        assert failures == [True]
+
+        _serve_one(requests, responses, lambda request: None)
+        responses.writer.close()
+        with pytest.raises(ConnectionError):
+            client.request("closed")
+    finally:
+        requests.close()
+        responses.close()

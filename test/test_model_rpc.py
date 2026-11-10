@@ -401,45 +401,6 @@ def test_concurrent_device_memory_metrics_share_worker_snapshot(monkeypatch):
         assert request_count == 1
 
 
-def test_rpc_timeout_includes_blocked_stdin_write():
-    release_write = threading.Event()
-    terminated = threading.Event()
-
-    class BlockingStdin:
-        def write(self, value):
-            release_write.wait(timeout=2)
-
-        def flush(self):
-            pass
-
-    class FakeProcess:
-        pid = 123
-        stdin = BlockingStdin()
-
-        @staticmethod
-        def poll():
-            return None
-
-    process = ModelProcess.__new__(ModelProcess)
-    process.timeout_seconds = 0.05
-    process._process = FakeProcess()  # type: ignore[assignment]
-    process._request_id = 0
-    process._lock = threading.Lock()
-
-    def terminate() -> None:
-        terminated.set()
-        release_write.set()
-
-    process._terminate_process = terminate  # type: ignore[method-assign]
-    started = time.monotonic()
-
-    with pytest.raises(ModelRPCError, match="timed out after 0.05 seconds"):
-        process.request("blocked")
-
-    assert time.monotonic() - started < 0.5
-    assert terminated.is_set()
-
-
 def test_close_terminates_worker_blocked_in_rpc(monkeypatch, tmp_path: Path):
     module = tmp_path / "blocking_fixture.py"
     module.write_text(

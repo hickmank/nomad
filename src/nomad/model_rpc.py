@@ -9,17 +9,9 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Empty, Queue
 from typing import Any
 
-from .jsonrpc import (
-    JSONRPCError,
-    ProtocolError,
-    decode,
-    encode_line,
-    make_request,
-    parse_response,
-)
+from .jsonrpc import JSONRPCClient, JSONRPCError, ProtocolError
 from .model_env import ExistingEnvironment, ModelEnvironment, PythonEnvironment
 
 logger = logging.getLogger(__name__)
@@ -66,7 +58,6 @@ class ModelProcess:
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than 0 or None")
         self.environment = environment
-        self.timeout_seconds = timeout_seconds
         python = environment.ensure()
         child_env = dict(os.environ)
         isolated = isinstance(environment, ModelEnvironment | ExistingEnvironment)
@@ -91,21 +82,23 @@ class ModelProcess:
             cwd=environment.base_dir if isolated else None,
             start_new_session=os.name != "nt",
         )
-        self._request_id = 0
-        self._lock = threading.Lock()
-        self._responses: Queue[str | None] = Queue()
-        self._stderr: deque[str] = deque(maxlen=100)
-        self._stdout_thread = threading.Thread(
-            target=self._drain_stdout,
-            daemon=True,
-            name=f"nomad-model-stdout-{self._process.pid}",
+        assert self._process.stdin is not None
+        assert self._process.stdout is not None
+        # A worker that timed out or sent garbage may be stuck or out of sync,
+        # so the client terminates it before reporting the failure.
+        self._rpc = JSONRPCClient(
+            self._process.stdin,
+            self._process.stdout,
+            timeout_seconds=timeout_seconds,
+            on_failure=self._terminate_process,
+            name=f"nomad-model-{self._process.pid}",
         )
+        self._stderr: deque[str] = deque(maxlen=100)
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr,
             daemon=True,
             name=f"nomad-model-stderr-{self._process.pid}",
         )
-        self._stdout_thread.start()
         self._stderr_thread.start()
 
     @property
@@ -116,94 +109,33 @@ class ModelProcess:
     def alive(self) -> bool:
         return self._process.poll() is None
 
+    @property
+    def timeout_seconds(self) -> float | None:
+        return self._rpc.timeout_seconds
+
+    @timeout_seconds.setter
+    def timeout_seconds(self, value: float | None) -> None:
+        self._rpc.timeout_seconds = value
+
     def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        timeout_seconds = self.timeout_seconds
-        deadline = (
-            None if timeout_seconds is None else time.monotonic() + timeout_seconds
-        )
-        if timeout_seconds is None:
-            acquired = self._lock.acquire()
-        else:
-            acquired = self._lock.acquire(timeout=timeout_seconds)
-        if not acquired:
-            raise self._timeout_error(method)
-
+        """Call ``method`` on the worker, translating failures to ``ModelRPCError``."""
+        if not self.alive:
+            raise ModelRPCError(self._exited_message())
         try:
-            if not self.alive:
-                raise ModelRPCError(self._exited_message())
-            self._request_id += 1
-            request_id = self._request_id
-            payload = make_request(method, params, request_id=request_id)
-            self._write_request(payload, method=method, deadline=deadline)
-
-            response_timeout = (
-                None if deadline is None else max(0.0, deadline - time.monotonic())
-            )
-            try:
-                response_line = self._responses.get(timeout=response_timeout)
-            except Empty as exc:
-                assert timeout_seconds is not None
-                self._terminate_process()
-                raise self._timeout_error(method) from exc
-            if response_line is None:
-                raise ModelRPCError(self._exited_message())
-            try:
-                return parse_response(decode(response_line), expected_id=request_id)
-            except ProtocolError as exc:
-                self._terminate_process()
-                raise ModelRPCError(
-                    f"Model worker sent an invalid JSON-RPC response: {exc}"
-                ) from exc
-            except JSONRPCError as exc:
-                raise ModelRPCError(exc.message) from exc
-        finally:
-            self._lock.release()
-
-    def _write_request(
-        self,
-        payload: dict[str, Any],
-        *,
-        method: str,
-        deadline: float | None,
-    ) -> None:
-        """Write one request without allowing a blocked pipe to evade the deadline."""
-        assert self._process.stdin is not None
-        serialized = encode_line(payload)
-        errors: list[BaseException] = []
-        completed = threading.Event()
-
-        def write() -> None:
-            try:
-                assert self._process.stdin is not None
-                self._process.stdin.write(serialized)
-                self._process.stdin.flush()
-            except BaseException as exc:  # transported back to the request thread
-                errors.append(exc)
-            finally:
-                completed.set()
-
-        if deadline is None:
-            write()
-        else:
-            writer = threading.Thread(
-                target=write,
-                daemon=True,
-                name=f"nomad-model-stdin-{self._process.pid}",
-            )
-            writer.start()
-            if not completed.wait(max(0.0, deadline - time.monotonic())):
-                self._terminate_process()
-                raise self._timeout_error(method)
-
-        if errors:
-            raise ModelRPCError(self._exited_message()) from errors[0]
-
-    def _timeout_error(self, method: str) -> ModelRPCError:
-        assert self.timeout_seconds is not None
-        return ModelRPCError(
-            f"Model worker RPC '{method}' timed out after "
-            f"{self.timeout_seconds:g} seconds"
-        )
+            return self._rpc.request(method, params)
+        except TimeoutError as exc:
+            raise ModelRPCError(
+                f"Model worker RPC '{method}' timed out after "
+                f"{self.timeout_seconds:g} seconds"
+            ) from exc
+        except ConnectionError as exc:
+            raise ModelRPCError(self._exited_message()) from exc
+        except ProtocolError as exc:
+            raise ModelRPCError(
+                f"Model worker sent an invalid JSON-RPC response: {exc}"
+            ) from exc
+        except JSONRPCError as exc:
+            raise ModelRPCError(exc.message) from exc
 
     def load(self, remote: RemoteModel, device: str) -> dict[str, Any]:
         result = self.request("load", remote.load_params(device))
@@ -234,12 +166,12 @@ class ModelProcess:
         return result
 
     def close(self) -> None:
-        acquired = self._lock.acquire(timeout=_CLOSE_LOCK_GRACE_SECONDS)
+        acquired = self._rpc.acquire(timeout=_CLOSE_LOCK_GRACE_SECONDS)
         if not acquired:
-            # A request may be blocked in readline(). Terminating the process group
+            # A request may be waiting for a reply. Terminating the process group
             # closes the protocol pipe and allows that request to release the lock.
             self._terminate_process()
-            acquired = self._lock.acquire(timeout=_PROCESS_EXIT_GRACE_SECONDS)
+            acquired = self._rpc.acquire(timeout=_PROCESS_EXIT_GRACE_SECONDS)
         if not acquired:
             logger.warning("Model worker %s did not release its RPC lock", self.pid)
             return
@@ -247,16 +179,10 @@ class ModelProcess:
         try:
             if self.alive:
                 try:
-                    assert self._process.stdin is not None
-                    self._request_id += 1
-                    self._process.stdin.write(
-                        encode_line(
-                            make_request("shutdown", request_id=self._request_id)
-                        )
-                    )
-                    self._process.stdin.flush()
+                    # Ask the worker to exit; its reply is not needed.
+                    self._rpc.send("shutdown")
                     self._process.wait(timeout=_PROCESS_EXIT_GRACE_SECONDS)
-                except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                except (ConnectionError, subprocess.TimeoutExpired):
                     self._terminate_process()
             if os.name != "nt":
                 self._terminate_remaining_process_group()
@@ -269,7 +195,7 @@ class ModelProcess:
                 if stream is not None:
                     stream.close()
         finally:
-            self._lock.release()
+            self._rpc.release()
 
     def _terminate_process(self) -> None:
         if os.name == "nt":
@@ -330,14 +256,6 @@ class ModelProcess:
             line = line.rstrip()
             self._stderr.append(line)
             logger.debug("model worker %s: %s", self.pid, line)
-
-    def _drain_stdout(self) -> None:
-        assert self._process.stdout is not None
-        try:
-            for line in self._process.stdout:
-                self._responses.put(line)
-        finally:
-            self._responses.put(None)
 
     def _exited_message(self) -> str:
         message = f"Model worker exited with status {self._process.poll()}"
