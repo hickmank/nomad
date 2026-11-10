@@ -66,6 +66,8 @@ RUN --mount=type=secret,id=nomad_build_ca,target=/etc/ssl/certs/ca-certificates.
 
 # Local packages that env: entries reference, for example
 #   env: my-model-package @ file:///src/my-model-package
+# nomad export copies them into /opt/nomad/packages, so /src is only needed
+# while it runs.
 COPY my-model-package /src/my-model-package
 COPY server /src/server
 
@@ -77,12 +79,11 @@ CMD ["nomad", "serve", "/opt/nomad/nomad.yml", \
      "--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-`env` direct references must use paths that exist inside the image. Either
-write them as image paths, as above, or use a placeholder such as
-`file://${SRC}/my-model-package` and set `SRC` in the build. Keep those
-sources in the final image, unchanged: Nomad identifies a bundled environment
-partly by the contents of its local packages, so a server whose image lacks
-them reports the environment as not prebuilt.
+`env` direct references must use paths that exist inside the image while
+`nomad export` runs. Either write them as image paths, as above, or use a
+placeholder such as `file://${SRC}/my-model-package` and set `SRC` in the build.
+Export copies each local package into the bundle and points the exported config
+at the copy.
 `NOMAD_CACHE` must point at the export directory when the server runs, so that
 Nomad finds the bundled environments.
 

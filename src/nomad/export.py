@@ -6,12 +6,15 @@ from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 from uuid import uuid4
 
 import click
 import typer
 import yaml
 from fastmcp.tools import Tool as FastMCPTool
+from packaging.requirements import Requirement
 
 from nomad.common.config_errors import ConfigError
 from nomad.common.name_sanitize import sanitize_export_name, sanitize_mcp_name
@@ -19,7 +22,7 @@ from nomad.config import ServerConfig, TorchModuleConfig
 from nomad.hub import RepoSpec
 from nomad.logging_utils import configure_root_logging, parse_log_level
 from nomad.model_cards import ModelCardLocator
-from nomad.model_env import ModelEnvironment
+from nomad.model_env import ModelEnvironment, copy_local_source
 
 LogLevelName = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LOGGER = logging.getLogger(__name__)
@@ -260,6 +263,64 @@ def _build_exported_model_environments(
         environment.ensure(cache_root=cache_root)
 
 
+def _bundle_local_packages(
+    raw_models: list[Any],
+    models: list[TorchModuleConfig],
+    *,
+    output_dir: Path,
+) -> list[TorchModuleConfig]:
+    """Copy local ``file:`` packages in ``env`` into ``<output>/packages``.
+
+    Each such requirement is rewritten, in the exported config and in the
+    returned models, to point at its copy, so the bundle does not depend on
+    sources outside it. Extras and markers are kept. A package shared by
+    several requirements is copied once.
+
+    Args:
+        raw_models: The exported ``fmod_models`` entries, rewritten in place.
+        models: The validated models, in the same order as ``raw_models``.
+        output_dir: The export directory.
+
+    Returns:
+        ``models`` with ``env`` pointing at the bundled copies.
+    """
+    packages_dir = output_dir.resolve() / "packages"
+    used_names: set[str] = set()
+    copies: dict[Path, Path] = {}
+
+    def bundle(requirement: str) -> str:
+        parsed = Requirement(requirement)
+        if parsed.url is None or urlsplit(parsed.url).scheme != "file":
+            return requirement
+        source = Path(url2pathname(urlsplit(parsed.url).path))
+        if not source.exists():
+            raise ValueError(f"Local package for {requirement!r} not found: {source}")
+        if source not in copies:
+            # Keep a file's own name: installers read a wheel's or sdist's
+            # metadata from it.
+            directory = packages_dir / _choose_unique_name(
+                parsed.name, used_names=used_names
+            )
+            copies[source] = directory / source.name if source.is_file() else directory
+            LOGGER.info("Bundling local package %s", source)
+            copy_local_source(source, copies[source])
+        parsed.url = copies[source].as_uri()
+        return str(parsed)
+
+    bundled_models: list[TorchModuleConfig] = []
+    for raw_entry, model in zip(raw_models, models, strict=True):
+        if model.env is None or not isinstance(raw_entry, dict):
+            bundled_models.append(model)
+            continue
+        if isinstance(model.env, str):
+            env: str | list[str] = bundle(model.env)
+        else:
+            env = [bundle(requirement) for requirement in model.env]
+        raw_entry["env"] = env
+        bundled_models.append(model.model_copy(update={"env": env}))
+    return bundled_models
+
+
 def _reject_existing_interpreters(models: list[TorchModuleConfig]) -> None:
     """Refuse to export models that run in an external ``python`` interpreter.
 
@@ -296,9 +357,12 @@ def export_models_config(
     )
 
     raw_models = exported_data.get("fmod_models", []) or []
+    models = _bundle_local_packages(
+        raw_models, config.fmod_models, output_dir=output_dir
+    )
     if build_venvs:
         _build_exported_model_environments(
-            config.fmod_models,
+            models,
             base_dir=config.context_dir,
             cache_root=output_dir,
         )

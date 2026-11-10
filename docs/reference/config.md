@@ -59,9 +59,10 @@ Nomad builds, caches, and runs each model's environment in the tool manager;
 see {doc}`api-tool-manager` for how that works and for the related
 `tool_manager` settings.
 
-`nomad export` leaves requirement strings and lists unchanged and builds their
-explicit environments under `<output>/venv` by default, without loading the
-models. Set `NOMAD_CACHE=<output>` when serving the exported config so those
+`nomad export` copies each local `file://` package in `env` into
+`<output>/packages` and rewrites its requirement to point at the copy; other
+requirements are left unchanged. It then builds the explicit environments under
+`<output>/venv` by default, without loading the models. Set `NOMAD_CACHE=<output>` when serving the exported config so those
 environments are reused, and sets `tool_manager.build_envs: false` in the
 exported config so the server never builds environments at run time. Virtual
 environments are not relocatable: they only work with the Python, operating

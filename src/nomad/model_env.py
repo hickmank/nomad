@@ -136,9 +136,7 @@ class ModelEnvironment:
                 "Model environment is not prebuilt and building is disabled "
                 f"(tool_manager.build_envs is false). Expected {target}. Run "
                 "`nomad export` with the same Python and Nomad installation that "
-                "serves the bundle, and set NOMAD_CACHE to the export directory. "
-                "Local file:// packages in env must also still exist, unchanged, "
-                "at the same paths."
+                "serves the bundle, and set NOMAD_CACHE to the export directory."
             )
 
         root.mkdir(parents=True, exist_ok=True)
@@ -390,11 +388,7 @@ def _local_source_digest(path: Path) -> bytes:
         # Prune in place so os.walk does not descend into skipped directories,
         # and sort so the digest does not depend on directory listing order.
         dirs[:] = sorted(
-            name
-            for name in dirs
-            if name not in _SKIPPED_SOURCE_DIRS
-            and not name.endswith(".egg-info")
-            and not (Path(root) / name / "pyvenv.cfg").is_file()
+            name for name in dirs if not _is_skipped_source_dir(Path(root), name)
         )
         for name in sorted(files):
             file_path = Path(root) / name
@@ -405,6 +399,40 @@ def _local_source_digest(path: Path) -> bytes:
             digest.update(b"\0contents\0")
             digest.update(file_path.read_bytes())
     return digest.digest()
+
+
+def copy_local_source(source: Path, destination: Path) -> None:
+    """Copy a local package file or source tree, skipping what hashing skips.
+
+    Args:
+        source: The file or directory a ``file:`` requirement points at.
+        destination: Where to put the copy; must not exist yet.
+    """
+    if source.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return
+
+    def ignore(root: str, names: list[str]) -> list[str]:
+        return [name for name in names if _is_skipped_source_dir(Path(root), name)]
+
+    shutil.copytree(source, destination, ignore=ignore)
+
+
+def _is_skipped_source_dir(parent: Path, name: str) -> bool:
+    """Return whether ``parent / name`` is a directory local packages skip.
+
+    Skipped are ``_SKIPPED_SOURCE_DIRS``, ``*.egg-info``, and any virtual
+    environment (a directory containing ``pyvenv.cfg``).
+    """
+    path = parent / name
+    if not path.is_dir():
+        return False
+    return (
+        name in _SKIPPED_SOURCE_DIRS
+        or name.endswith(".egg-info")
+        or (path / "pyvenv.cfg").is_file()
+    )
 
 
 def _venv_python(venv: Path) -> Path:
@@ -472,5 +500,6 @@ __all__ = [
     "HostEnvironment",
     "ModelEnvironment",
     "PythonEnvironment",
+    "copy_local_source",
     "resolve_model_environment",
 ]

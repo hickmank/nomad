@@ -69,6 +69,102 @@ def test_export_models_config_builds_pep508_environments(
     assert exported["tool_manager"]["build_envs"] is False
 
 
+def test_export_bundles_local_file_packages(monkeypatch, tmp_path: Path):
+    built = []
+
+    def fake_ensure(self, *, cache_root=None):
+        built.append(self.requirements)
+        return cache_root / "venv" / "python"
+
+    monkeypatch.setattr("nomad.export.ModelEnvironment.ensure", fake_ensure)
+    config_dir = tmp_path / "config"
+    model_dir = config_dir / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.bin").write_text("weights", encoding="utf-8")
+    package = tmp_path / "src" / "demo-local"
+    (package / "demo_local").mkdir(parents=True)
+    (package / "pyproject.toml").write_text("[project]\nname = 'demo-local'\n")
+    (package / "demo_local" / "__init__.py").write_text("VALUE = 1\n")
+    (package / ".git").mkdir()
+    (package / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    wheel = tmp_path / "wheels" / "demo_wheel-1.0-py3-none-any.whl"
+    wheel.parent.mkdir()
+    wheel.write_bytes(b"wheel")
+    config_path = config_dir / "nomad.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "fmod_models:",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                "    tool_name: first-model",
+                "    env:",
+                f"      - demo-local[extra] @ {package.as_uri()}",
+                f"      - demo-wheel @ {wheel.as_uri()}",
+                "      - remote-package==1.0",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                "    tool_name: second-model",
+                f"    env: demo-local @ {package.as_uri()}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bundle = tmp_path / "bundle"
+
+    output_path = export_models_config(config_path, bundle)
+
+    packages = bundle.resolve() / "packages"
+    # Sources are copied once, without VCS metadata; a file keeps its name.
+    assert sorted(path.name for path in packages.iterdir()) == [
+        "demo-local",
+        "demo-wheel",
+    ]
+    assert (packages / "demo-local" / "demo_local" / "__init__.py").is_file()
+    assert not (packages / "demo-local" / ".git").exists()
+    assert (packages / "demo-wheel" / wheel.name).read_bytes() == b"wheel"
+
+    expected_first = [
+        f"demo-local[extra] @ {(packages / 'demo-local').as_uri()}",
+        f"demo-wheel @ {(packages / 'demo-wheel' / wheel.name).as_uri()}",
+        "remote-package==1.0",
+    ]
+    expected_second = f"demo-local @ {(packages / 'demo-local').as_uri()}"
+    exported = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert [entry["env"] for entry in exported["fmod_models"]] == [
+        expected_first,
+        expected_second,
+    ]
+    # Environments are built from the bundled copies, so serving the bundle
+    # computes the same environment identity.
+    assert built == [tuple(expected_first), (expected_second,)]
+
+
+def test_export_rejects_missing_local_file_package(tmp_path: Path):
+    config_dir = tmp_path / "config"
+    model_dir = config_dir / "models" / "demo"
+    model_dir.mkdir(parents=True)
+    (model_dir / "weights.bin").write_text("weights", encoding="utf-8")
+    missing = tmp_path / "missing-package"
+    config_path = config_dir / "nomad.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "fmod_models:",
+                "  - model_class: demo.Tool",
+                "    name_or_path: models/demo",
+                f"    env: demo-local @ {missing.as_uri()}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Local package .* not found"):
+        export_models_config(config_path, tmp_path / "bundle")
+
+
 def test_export_models_config_can_skip_venvs(monkeypatch, tmp_path: Path):
     project_dir = tmp_path / "config"
     model_dir = project_dir / "models" / "demo"
