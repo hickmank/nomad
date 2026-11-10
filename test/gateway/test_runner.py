@@ -738,7 +738,9 @@ def test_runtime_entrypoints_import_only_runtime_and_stdlib(
         allowed_files=(
             wrappers_root / "nomad" / "__init__.py",
             wrappers_root / "nomad" / "gateway" / "__init__.py",
-            # Shared JSON-RPC 2.0 support; its own imports are traced too.
+            # Shared JSON-RPC 2.0 support. Only this file is exempt: the trace
+            # lists every module the process loads, so anything jsonrpc.py
+            # imports is still checked above.
             wrappers_root / "nomad" / "jsonrpc.py",
             wrappers_package_root / "__init__.py",
         ),
