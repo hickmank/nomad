@@ -85,9 +85,10 @@ deployment rules and packaging constraints live in the
 
 ## Create an Importable Package
 
-`nomad serve` loads your class or function by dotted import path, so that exact
-symbol must be importable in the model's configured `env`. When `env` is
-omitted, the model subprocess uses the same Python environment as the server.
+`nomad serve` loads your class or function by dotted import path in the
+model's own Python environment, which Nomad builds from the model's `env`
+requirements. List your package in `env`, so that exact symbol is importable
+there.
 
 Minimal repository shape:
 
@@ -106,12 +107,12 @@ To quickly check, from the top-level `./my_pkg` directory, run:
 uv run python -c "from my_pkg.mcp import MyModelTool; print(MyModelTool)"
 ```
 
-For local development, either install your package into the environment used
-to run `nomad serve`, or set the model's `env` to a PEP 508 direct reference
-such as `my-pkg @ file:///absolute/path/to/my_pkg`. Nomad installs `env` into a
-cached model-specific environment. The field accepts one PEP 508 requirement
-string or a list of them; requirements and project file paths are not
-supported, and direct references must use absolute URLs.
+For local development, set `env` to a PEP 508 direct reference to your
+checkout, such as `my-pkg @ file:///absolute/path/to/my_pkg`. Nomad installs
+`env` into a cached model-specific environment and rebuilds it when your
+package's files change. The field accepts one PEP 508 requirement string or a
+list of them; requirements and project file paths are not supported, and direct
+references must use absolute URLs.
 
 For demo deployments without an explicit model `env`, the host environment is
 defined by
@@ -267,6 +268,7 @@ If you are serving one SciFM, start with a complete `nomad.yml` like this:
 fmod_models:
   - model_class: my_pkg.mcp.MyModelTool
     name_or_path: my-org/my-model-v2
+    env: my-pkg==1.2
     tool_name: my-model-v2
     batch_size: 32
 ```
