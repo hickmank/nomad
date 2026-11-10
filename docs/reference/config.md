@@ -43,10 +43,21 @@ Use `tools` for regular Python callables and `fmod_models` for
 {py:class}`nomad.fm_base_tool.TorchModuleTool` implementations. `name_or_path`
 can point at several model source types:
 
-Set a model's `env` to one PEP 508 requirement string or a list of PEP 508
-requirements. `requirements.txt` and `pyproject.toml` paths are not supported.
-Direct references must use absolute URLs, such as
-`my-package @ file:///opt/packages/my-package`.
+Set a model's `env` to one requirement string or a list of them. Requirements
+use the standard
+[dependency specifier](https://packaging.python.org/en/latest/specifications/dependency-specifiers/)
+format (PEP 508), the same one `pip install` and `pyproject.toml` dependencies
+use. For example:
+
+- `my-package>=1.2,<2`: a version range from the package index.
+- `my-package[gpu]==1.2`: with an optional extra.
+- `my-package @ file:///opt/packages/my-package`: a local checkout, wheel, or
+  sdist (a direct reference).
+- `my-package @ git+https://example.org/my-org/my-package.git@v1.2`: a Git
+  revision.
+
+`requirements.txt` and `pyproject.toml` paths are not supported. Direct
+references must use absolute URLs.
 
 :::{warning}
 Use `env` for every model you intend to deploy. A model may instead set
