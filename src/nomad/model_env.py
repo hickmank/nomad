@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from urllib.request import url2pathname
 from uuid import uuid4
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 from packaging.requirements import InvalidRequirement, Requirement
 
 from .hub import get_cache_root
@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 _COMPLETE_MARKER = ".nomad-complete"
 _CACHE_FORMAT = "3"
 _HASH_PREFIX = "nomad-venv-"
+# How long to wait for another process that is building the same environment.
+# Building can download and install large packages such as torch, so this is
+# generous; it exists to turn a hung builder into an error, not to bound builds.
+_BUILD_LOCK_TIMEOUT_SECONDS = 3600.0
 # Directories skipped when hashing a local package: VCS metadata, caches,
 # virtual environments, and build output. They are large, change without the
 # package changing, and are not what an installer builds from.
@@ -140,39 +144,48 @@ class ModelEnvironment:
             )
 
         root.mkdir(parents=True, exist_ok=True)
-        lock = FileLock(str(root / f".{checksum}.lock"))
-        with lock:
-            if python := _completed_environment(target, expected_marker):
-                logger.debug("Reusing model environment %s", target)
-                return python
+        lock_path = root / f".{checksum}.lock"
+        # Another process may be building the same environment; wait for it,
+        # but not forever. Only acquiring the lock raises ``Timeout``.
+        try:
+            with FileLock(str(lock_path), timeout=_BUILD_LOCK_TIMEOUT_SECONDS):
+                if python := _completed_environment(target, expected_marker):
+                    logger.debug("Reusing model environment %s", target)
+                    return python
 
-            if target.exists():
-                shutil.rmtree(target)
+                if target.exists():
+                    shutil.rmtree(target)
 
-            temporary = root / f".{checksum}.tmp-{uuid4().hex}"
-            try:
-                self._create(
-                    temporary,
-                    checksum=checksum,
-                    nomad_requirement=nomad_requirement,
-                )
-                (temporary / _COMPLETE_MARKER).write_text(
-                    expected_marker, encoding="utf-8"
-                )
-                temporary.replace(target)
-            except BaseException as exc:
-                shutil.rmtree(temporary, ignore_errors=True)
-                if isinstance(exc, RuntimeError):
-                    # The installer's own output is already on stderr; add what
-                    # was being built and the usual cause for exported bundles.
-                    raise RuntimeError(
-                        f"{exc} while building model environment {target} for "
-                        f"requirements {list(self.requirements)!r}. If this "
-                        "server runs from a `nomad export` bundle, check that "
-                        "NOMAD_CACHE points at the export directory and that it "
-                        "runs with the same Python and Nomad as the export."
-                    ) from exc
-                raise
+                temporary = root / f".{checksum}.tmp-{uuid4().hex}"
+                try:
+                    self._create(
+                        temporary,
+                        checksum=checksum,
+                        nomad_requirement=nomad_requirement,
+                    )
+                    (temporary / _COMPLETE_MARKER).write_text(
+                        expected_marker, encoding="utf-8"
+                    )
+                    temporary.replace(target)
+                except BaseException as exc:
+                    shutil.rmtree(temporary, ignore_errors=True)
+                    if isinstance(exc, RuntimeError):
+                        # The installer's own output is already on stderr; add what
+                        # was being built and the usual cause for exported bundles.
+                        raise RuntimeError(
+                            f"{exc} while building model environment {target} for "
+                            f"requirements {list(self.requirements)!r}. If this "
+                            "server runs from a `nomad export` bundle, check that "
+                            "NOMAD_CACHE points at the export directory and that it "
+                            "runs with the same Python and Nomad as the export."
+                        ) from exc
+                    raise
+        except Timeout as exc:
+            raise RuntimeError(
+                f"Timed out after {_BUILD_LOCK_TIMEOUT_SECONDS:g} seconds waiting "
+                f"for another process to build model environment {target} "
+                f"(lock {lock_path})"
+            ) from exc
 
         return _venv_python(target)
 

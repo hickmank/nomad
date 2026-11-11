@@ -443,6 +443,41 @@ def test_same_checksum_environment_creation_is_serialized(monkeypatch, tmp_path:
     assert results[0] == results[1]
 
 
+def test_environment_build_lock_times_out(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("NOMAD_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(model_env, "_BUILD_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        model_env.ModelEnvironment,
+        "_create",
+        lambda *args, **kwargs: pytest.fail("build ran without the lock"),
+    )
+    environment = model_env.resolve_model_environment(
+        ["demo-package"], base_dir=tmp_path
+    )
+    root = tmp_path / "cache" / "venv"
+    root.mkdir(parents=True)
+    lock_path = root / f".{environment.checksum}.lock"
+    # Another "process" holds the build lock and never releases it. FileLock is
+    # reentrant within a thread, so hold it from a different thread.
+    holder_ready = Event()
+    release_holder = Event()
+
+    def hold() -> None:
+        with model_env.FileLock(str(lock_path)):
+            holder_ready.set()
+            release_holder.wait(timeout=5)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        holder = executor.submit(hold)
+        assert holder_ready.wait(timeout=2)
+        try:
+            with pytest.raises(RuntimeError, match="Timed out after 0.05 seconds"):
+                environment.ensure()
+        finally:
+            release_holder.set()
+            holder.result(timeout=2)
+
+
 def test_different_checksum_environments_build_concurrently(
     monkeypatch, tmp_path: Path
 ):
