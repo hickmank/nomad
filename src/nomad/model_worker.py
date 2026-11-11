@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gc
-import importlib
 import sys
 from collections.abc import Mapping
 from typing import Any, TextIO
@@ -10,14 +9,8 @@ import torch
 
 from nomad import accelerator
 from nomad._torch_module_compat import is_torch_module_tool_instance
+from nomad.config import resolve_symbol
 from nomad.jsonrpc import JSONRPCServer, rpc_method
-
-
-def _resolve_symbol(dotted_path: str) -> Any:
-    module_path, separator, attribute = dotted_path.rpartition(".")
-    if not separator:
-        raise ValueError(f"Invalid dotted path '{dotted_path}'")
-    return getattr(importlib.import_module(module_path), attribute)
 
 
 class ModelWorker(JSONRPCServer):
@@ -31,7 +24,7 @@ class ModelWorker(JSONRPCServer):
     @rpc_method
     def load(self, params: Mapping[str, Any]) -> dict[str, Any]:
         self._discard_tool()
-        model_class = _resolve_symbol(str(params["model_class"]))
+        model_class = resolve_symbol(str(params["model_class"]))
         if not hasattr(model_class, "from_pretrained"):
             raise TypeError(
                 f"{params['model_class']} does not expose a 'from_pretrained' constructor"
