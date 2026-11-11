@@ -272,7 +272,30 @@ def test_uv_refreshes_only_local_file_packages(monkeypatch, tmp_path: Path):
         for index, argument in enumerate(install)
         if argument == "--refresh-package"
     ]
-    assert refreshed == ["demo-local"]
+    # Nomad itself is refreshed too when it is installed from a checkout.
+    nomad_requirement, _ = model_env._nomad_requirement()
+    expected = ["demo-local"]
+    if "@ file:" in nomad_requirement:
+        expected.append("nomad-scifm")
+    assert refreshed == expected
+
+
+def test_nomad_checkout_material_tracks_source_not_docs(tmp_path: Path):
+    checkout = tmp_path / "nomad"
+    (checkout / "src" / "nomad").mkdir(parents=True)
+    (checkout / "docs").mkdir()
+    (checkout / "pyproject.toml").write_text("[project]\nname = 'nomad-scifm'\n")
+    module = checkout / "src" / "nomad" / "module.py"
+    module.write_text("VALUE = 1\n")
+    original = model_env._nomad_checkout_material(checkout)
+
+    (checkout / "docs" / "guide.md").write_text("docs")
+    (checkout / "src" / "nomad" / "__pycache__").mkdir()
+    (checkout / "src" / "nomad" / "__pycache__" / "module.pyc").write_bytes(b"pyc")
+    assert model_env._nomad_checkout_material(checkout) == original
+
+    module.write_text("VALUE = 2\n")
+    assert model_env._nomad_checkout_material(checkout) != original
 
 
 def test_environment_cache_is_reused(monkeypatch, tmp_path: Path):

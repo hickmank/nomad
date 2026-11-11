@@ -199,8 +199,10 @@ class ModelEnvironment:
             installer = [uv, "pip", "install", "--python", str(_venv_python(target))]
             # uv reuses wheels it built from local directories unless their
             # build metadata changes, so force a fresh build of each local
-            # package; the checksum already says its contents changed.
-            for name, _path in _local_requirement_paths(self.requirements):
+            # package, including Nomad itself when it runs from a checkout;
+            # the checksum already says their contents changed.
+            local = _local_requirement_paths((*self.requirements, nomad_requirement))
+            for name, _path in local:
                 installer += ["--refresh-package", name]
         else:
             logger.info(
@@ -478,7 +480,7 @@ def _nomad_requirement() -> tuple[str, bytes]:
     if pyproject.is_file():
         return (
             f"nomad-scifm @ {source_root.as_uri()}",
-            pyproject.read_bytes(),
+            _nomad_checkout_material(source_root),
         )
 
     try:
@@ -489,6 +491,27 @@ def _nomad_requirement() -> tuple[str, bytes]:
         ) from exc
     requirement = f"nomad-scifm=={installed_version}"
     return requirement, b""
+
+
+def _nomad_checkout_material(source_root: Path) -> bytes:
+    """Return checksum material for a Nomad source checkout.
+
+    Covers ``pyproject.toml`` and the ``src`` tree that gets installed, so any
+    edit to Nomad's code or dependencies gives model environments a new
+    identity, while edits to tests or docs do not.
+
+    Args:
+        source_root: The checkout's root directory.
+
+    Returns:
+        The checksum material.
+    """
+    return b"\0".join(
+        (
+            (source_root / "pyproject.toml").read_bytes(),
+            _local_source_digest(source_root / "src"),
+        )
+    )
 
 
 def _run(command: list[str], *, cwd: Path) -> None:
