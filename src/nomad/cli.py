@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
@@ -10,6 +12,7 @@ from typing import Annotated, Any, Literal
 import click
 import typer
 from fastmcp import FastMCP
+from fastmcp.mcp_config import StdioMCPServer
 from typer.core import TyperCommand
 
 from ._torch_module_compat import add_torch_module_tool_to_fastmcp
@@ -18,7 +21,7 @@ from .common.upstream_errors import UpstreamConnectionError
 from .config import ServerConfig
 from .export import export as export_command
 from .gateway import cli as gateway_cli
-from .gateway.config import GatewayConfig
+from .gateway.config import GatewayConfig, GatewayDefaults
 from .gateway.server import CodeModeGateway
 from .logging_utils import configure_root_logging, parse_log_level
 from .model_cards import ModelCardLocator, register_model_card_tool
@@ -77,23 +80,61 @@ def _format_visible_devices(manager: Any) -> str:
     return "none"
 
 
-def run_code_mode_script(
+def _local_nomad_gateway_config(
     config_path: Path,
+    workspace_root: Path,
+) -> GatewayConfig:
+    return GatewayConfig(
+        servers={
+            "nomad": StdioMCPServer(
+                command=sys.executable,
+                args=[
+                    "-m",
+                    "nomad",
+                    "serve",
+                    str(config_path),
+                    "--transport",
+                    "stdio",
+                ],
+                env=os.environ.copy(),
+                keep_alive=False,
+            )
+        },
+        defaults=GatewayDefaults(workspace_root=workspace_root),
+    )
+
+
+def run_code_mode_script(
+    config_path: Path | None,
     script_path: Path,
     gateway_log_level: str,
     directory: Path = Path.cwd(),
     script_args: Sequence[str] = (),
+    nomad_config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Execute a Python script inside the code-mode gateway sandbox."""
 
     gateway_cli._configure_logging(gateway_log_level)
-    try:
-        gateway_config = GatewayConfig.from_file(config_path)
-    except ConfigError as exc:
-        raise typer.BadParameter(
-            f"Failed to load gateway config '{config_path}': {exc}"
-        ) from exc
-    gateway_config.defaults.workspace_root = directory
+    if config_path is not None and nomad_config_path is not None:
+        raise ValueError("Gateway and Nomad server configs are mutually exclusive")
+    if config_path is not None:
+        try:
+            gateway_config = GatewayConfig.from_file(config_path)
+        except ConfigError as exc:
+            raise typer.BadParameter(
+                f"Failed to load gateway config '{config_path}': {exc}"
+            ) from exc
+        gateway_config.defaults.workspace_root = directory
+    elif nomad_config_path is not None:
+        try:
+            ServerConfig.from_file(nomad_config_path)
+        except ConfigError as exc:
+            raise typer.BadParameter(
+                f"Failed to load Nomad config '{nomad_config_path}': {exc}"
+            ) from exc
+        gateway_config = _local_nomad_gateway_config(nomad_config_path, directory)
+    else:  # pragma: no cover - guarded by the CLI
+        raise ValueError("A gateway or Nomad server config is required")
     gateway_telemetry = getattr(gateway_config, "telemetry", None)
     configure_otel(
         service_name=getattr(gateway_telemetry, "service_name", "nomad-gateway"),
@@ -330,7 +371,7 @@ def code_mode_exec(
         ),
     ],
     config: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--config",
             "-c",
@@ -339,9 +380,27 @@ def code_mode_exec(
             dir_okay=False,
             readable=True,
             resolve_path=True,
-            help="Path to the code-mode gateway config file.",
+            help=(
+                "Path to the code-mode gateway config file. Mutually exclusive "
+                "with --nomad-config."
+            ),
         ),
-    ],
+    ] = None,
+    nomad_config: Annotated[
+        Path | None,
+        typer.Option(
+            "--nomad-config",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            resolve_path=True,
+            help=(
+                "Start a local Nomad stdio server from this server config. "
+                "Mutually exclusive with --config."
+            ),
+        ),
+    ] = None,
     directory: Annotated[
         Path,
         typer.Option(
@@ -376,11 +435,19 @@ def code_mode_exec(
 
     This is useful for validating a gateway config, testing tool access from a
     script, or capturing a structured JSON result without starting a long-lived
-    gateway process. Arguments after ``--`` are forwarded to the `SCRIPT`.
+    gateway process. ``--nomad-config`` starts an owned local Nomad server and
+    exposes it as ``mcp_tools.nomad``. Arguments after ``--`` are forwarded to
+    the `SCRIPT`.
     """
+
+    if config is not None and nomad_config is not None:
+        raise click.UsageError("--config and --nomad-config are mutually exclusive.")
+    if config is None and nomad_config is None:
+        raise click.UsageError("One of --config or --nomad-config is required.")
 
     result = run_code_mode_script(
         config_path=config,
+        nomad_config_path=nomad_config,
         script_path=script,
         gateway_log_level=gateway_log_level,
         directory=directory,

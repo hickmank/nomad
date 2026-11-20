@@ -71,6 +71,11 @@ tables.
 `nomad code-mode` and `nomad code-mode-exec` read YAML, TOML, or JSON into
 {py:class}`nomad.gateway.config.GatewayConfig`.
 
+For one-shot local execution, `nomad cmx --nomad-config nomad.yml SCRIPT`
+starts the configured Nomad server over stdio, exposes it as
+`mcp_tools.nomad`, runs the script, and then stops the server. The
+`--nomad-config` and `--config` options are mutually exclusive.
+
 ```yaml
 servers:
   nomad:

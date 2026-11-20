@@ -78,6 +78,29 @@ def _build_conflict_config(tmp_path: Path) -> GatewayConfig:
     return GatewayConfig(servers=servers, defaults=defaults, middleware=[])
 
 
+@pytest.mark.asyncio
+async def test_gateway_startup_failure_cleans_up_resources(monkeypatch, tmp_path: Path):
+    gateway = CodeModeGateway(_build_config(tmp_path))
+    wrappers_root = gateway._sandbox.wrappers_root
+    stop_called = False
+
+    async def fail_start() -> None:
+        raise RuntimeError("startup failed")
+
+    async def track_stop() -> None:
+        nonlocal stop_called
+        stop_called = True
+
+    monkeypatch.setattr(gateway._upstream, "start", fail_start)
+    monkeypatch.setattr(gateway._upstream, "stop", track_stop)
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await gateway.__aenter__()
+
+    assert stop_called is True
+    assert not wrappers_root.exists()
+
+
 def _workspace_root(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 

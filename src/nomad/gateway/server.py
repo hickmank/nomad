@@ -111,7 +111,18 @@ class CodeModeGateway:
         self._register_tools()
 
     async def __aenter__(self) -> CodeModeGateway:
-        await self._upstream.start()
+        try:
+            await self._upstream.start()
+        except BaseException:
+            try:
+                await self._upstream.stop()
+            except BaseException:
+                logger.exception("Failed to clean up upstreams after startup failure")
+            try:
+                await self._sandbox.aclose()
+            except BaseException:
+                logger.exception("Failed to clean up sandbox after startup failure")
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
