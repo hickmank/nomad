@@ -183,6 +183,20 @@ uv run nomad code-mode-exec \
   test.py
 ```
 
+For a local server, CMX can start and stop Nomad itself instead of using a
+gateway config and a separately managed server:
+
+```shell
+uv run nomad cmx \
+  --nomad-config nomad.yml \
+  --output - \
+  test.py
+```
+
+The local server is available to the script as `mcp_tools.nomad` and is stopped
+when the script finishes. `--nomad-config` and `--config` are mutually
+exclusive.
+
 This produces output like:
 ```jsonc
 {

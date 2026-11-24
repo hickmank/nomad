@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `nomad code-mode-exec` gained the ability to start and use a local nomad server ([#20]).
+
 ## [v0.2.1] - 2026-09-10
 
 ### Changed
@@ -57,3 +61,4 @@ Initial Public Release of Nomad
 [#8]: https://github.com/lanl/nomad/pull/8
 [#9]: https://github.com/lanl/nomad/pull/9
 [#10]: https://github.com/lanl/nomad/pull/10
+[#20]: https://github.com/lanl/nomad/pull/20

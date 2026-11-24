@@ -109,11 +109,19 @@ def _first_meaningful_exception_message(cause: BaseException) -> str:
 
 
 def _walk_exceptions(exc: BaseException) -> Iterable[BaseException]:
-    yield exc
-    if isinstance(exc, BaseExceptionGroup):
-        for child in exc.exceptions:
-            yield from _walk_exceptions(child)
-    if exc.__cause__ is not None:
-        yield from _walk_exceptions(exc.__cause__)
-    if exc.__context__ is not None:
-        yield from _walk_exceptions(exc.__context__)
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        yield current
+
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(reversed(current.exceptions))

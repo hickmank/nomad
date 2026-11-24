@@ -283,6 +283,19 @@ def test_upstream_ssl_failure_message_names_tls():
     assert "https://example.invalid/mcp" in message
 
 
+def test_upstream_connection_failure_handles_cyclic_exception_chain():
+    params = RemoteMCPServer(url="https://example.invalid/mcp")
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__cause__ = second
+    second.__context__ = first
+
+    error = UpstreamConnectionError("cyclic", params, first)
+
+    assert "Failed to connect to upstream MCP server 'cyclic'" in str(error)
+    assert "Underlying error: RuntimeError: first" in str(error)
+
+
 def test_log_file_forwarded(dummy_config: Path, monkeypatch, tmp_path: Path):
     captured: dict[str, Any] = {}
     log_file = tmp_path / "gateway.jsonl"
