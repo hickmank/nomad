@@ -304,7 +304,7 @@ def test_nomad_cli_cmx_runs_script_against_local_nomad_server(tmp_path: Path):
     nomad_config.write_text(
         "\n".join(
             [
-                "tool_manager: {enabled: false}",
+                "tool_manager: {}",
                 "tools:",
                 "  - tool: nomad.common.name_sanitize.sanitize_mcp_name",
                 "    name: sanitize_mcp_name",
